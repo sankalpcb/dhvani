@@ -1221,6 +1221,10 @@ class Recorded:
     def __init__(self, inner: Backend, mode: Mode, fixture_dir: str, store=None):
         if mode not in ("record", "replay", "live"):
             raise ValueError(f"unknown mode: {mode}")
+        if mode in ("live", "record") and store is None:
+            # Both modes invoke the paid backend; without a Store the spend
+            # ceiling is simply absent. Only replay may omit a store.
+            raise ValueError(f"mode={mode!r} makes paid calls and requires a Store")
         self.inner = inner
         self.mode = mode
         self.fixture_dir = fixture_dir
@@ -1249,11 +1253,12 @@ class Recorded:
         cost = self.inner.cost_per_call(segment)
         if self.store is not None:
             self.store.check_budget(cost)
+            # Record BEFORE the call: a crash after a paid call but before
+            # recording would under-count spend and breach the ceiling on
+            # restart. Pessimistic accounting fails safe.
+            self.store.record_spend(self.inner.name, cost)
 
         result = self.inner.transcribe(segment)
-
-        if self.store is not None:
-            self.store.record_spend(self.inner.name, cost)
 
         if self.mode == "record":
             path = self._path(segment)

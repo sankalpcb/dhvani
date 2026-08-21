@@ -460,7 +460,9 @@ git commit -m "feat: SQLite store with schema-enforced idempotency and spend cei
 - Consumes: `dhvani.audio.normalize`, `dhvani.ids.segment_id`, `dhvani.config.SAMPLE_RATE`
 - Produces:
   - `dhvani.segmenter.Segment` — frozen dataclass with fields `segment_id: str`, `t_start_ms: int`, `t_end_ms: int`, `pcm: np.ndarray`
-  - `dhvani.segmenter.segment(pcm: np.ndarray, min_ms=2000, max_ms=8000) -> list[Segment]`
+  - `dhvani.segmenter.segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]`
+    (no `min_ms`: splitting is the segmenter's job, filtering is the scorer's — see Task 5's
+    `short_segment` feature, which would be dead if short segments were dropped here)
 
 Energy-based VAD is used rather than Silero to keep the test suite dependency-free and
 deterministic. Swapping in Silero later is a one-function change behind this interface.
@@ -581,11 +583,13 @@ def _runs(voiced: np.ndarray, gap_frames: int) -> list[tuple[int, int]]:
                 runs.append((start, i - silence + 1))
                 start = None
     if start is not None:
-        runs.append((start, len(voiced)))
+        # Exclude pending sub-threshold silence: leaking it into the slice would change
+        # segment_id for identical speech and silently defeat the dedup cache.
+        runs.append((start, len(voiced) - silence))
     return runs
 
 
-def segment(pcm: np.ndarray, min_ms: int = 2000, max_ms: int = 8000) -> list[Segment]:
+def segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]:
     """Split int16 PCM into caption-sized segments. Deterministic."""
     frame_len = SAMPLE_RATE * FRAME_MS // 1000
     voiced = _voiced_frames(pcm, frame_len)

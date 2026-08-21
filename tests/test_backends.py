@@ -41,16 +41,18 @@ def _seg(sid="a" * 64):
 
 def test_record_mode_writes_a_fixture(tmp_path):
     inner = FakeBackend()
-    b = Recorded(inner, mode="record", fixture_dir=str(tmp_path), store=None)
-    out = b.transcribe(_seg())
-    assert out["text"] == "hello-1"
-    written = tmp_path / "fake" / f"{'a' * 64}.json"
-    assert json.loads(written.read_text())["text"] == "hello-1"
+    with Store(str(tmp_path / "t.db")) as store:
+        b = Recorded(inner, mode="record", fixture_dir=str(tmp_path), store=store)
+        out = b.transcribe(_seg())
+        assert out["text"] == "hello-1"
+        written = tmp_path / "fake" / f"{'a' * 64}.json"
+        assert json.loads(written.read_text())["text"] == "hello-1"
 
 
 def test_replay_mode_reads_fixture_without_calling_inner(tmp_path):
     inner = FakeBackend()
-    Recorded(inner, "record", str(tmp_path), None).transcribe(_seg())
+    with Store(str(tmp_path / "t.db")) as store:
+        Recorded(inner, "record", str(tmp_path), store).transcribe(_seg())
     assert inner.calls == 1
 
     replayer = Recorded(inner, "replay", str(tmp_path), None)
@@ -67,7 +69,8 @@ def test_replay_hard_fails_on_missing_fixture(tmp_path):
 
 def test_replay_costs_nothing(tmp_path):
     inner = FakeBackend()
-    Recorded(inner, "record", str(tmp_path), None).transcribe(_seg())
+    with Store(str(tmp_path / "t.db")) as store:
+        Recorded(inner, "record", str(tmp_path), store).transcribe(_seg())
     b = Recorded(inner, "replay", str(tmp_path), None)
     assert b.cost_per_call(_seg()) == 0.0
 
@@ -98,3 +101,27 @@ def test_live_mode_records_spend_before_call_so_crashes_cannot_undercount(tmp_pa
         with pytest.raises(RuntimeError, match="boom"):
             b.transcribe(_seg())
         assert store.total_spend() == pytest.approx(0.5)
+
+
+def test_live_mode_without_store_raises_value_error(tmp_path):
+    """A live-mode wrapper with store=None would make paid calls with zero
+    budget enforcement and zero spend accounting — the USD 20 ceiling would
+    simply be absent. This must be rejected at construction time."""
+    with pytest.raises(ValueError):
+        Recorded(FakeBackend(), "live", str(tmp_path), store=None)
+
+
+def test_record_mode_without_store_raises_value_error(tmp_path):
+    """record mode also invokes the paid inner backend (it calls, then
+    saves the response), so it has the exact same unmetered-spend hole as
+    live mode and must be rejected the same way."""
+    with pytest.raises(ValueError):
+        Recorded(FakeBackend(), "record", str(tmp_path), store=None)
+
+
+def test_replay_mode_without_store_still_constructs(tmp_path):
+    """Replay never calls anything, so store=None is the intended, safe
+    configuration for replay and must not regress."""
+    b = Recorded(FakeBackend(), "replay", str(tmp_path), store=None)
+    assert b.mode == "replay"
+    assert b.store is None

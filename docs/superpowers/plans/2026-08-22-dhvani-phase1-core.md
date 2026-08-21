@@ -1018,7 +1018,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.router'`
 
 Pure function, no I/O. This is the intellectual core of the system: given a
 fixed spend per audio-hour, decide which segments deserve expensive treatment.
-Greedy by delta/cost is the standard approximation to fractional knapsack.
+This is 0/1 knapsack; ratio-greedy (delta/cost) is a heuristic with NO optimality
+guarantee. Chosen because segment costs are near-uniform here (duration-proportional).
+See test_greedy_is_knowingly_suboptimal_with_heterogeneous_costs for a counterexample.
 """
 
 from dataclasses import dataclass
@@ -1036,8 +1038,8 @@ class Candidate:
 
 
 def bucket_of(risk: float) -> str:
-    """Map a risk score to its decile bucket label."""
-    idx = min(int(risk * N_BUCKETS), N_BUCKETS - 1)
+    """Map a risk score to its decile bucket label. Clamps risk to [0, 1]."""
+    idx = min(int(max(0.0, min(risk, 1.0)) * N_BUCKETS), N_BUCKETS - 1)
     return f"{idx / N_BUCKETS:.1f}-{(idx + 1) / N_BUCKETS:.1f}"
 
 

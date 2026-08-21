@@ -724,7 +724,7 @@ _INDIC_SCRIPTS = (
     "TAMIL", "TELUGU", "BENGALI", "GUJARATI", "ORIYA", "GURMUKHI",
 )
 
-_VOWELS = set("aeiou")
+_VOWELS = set("aeiouy")  # y counts as a vowel: else "my"/"why"/"sky" score max suspicion
 
 
 def script_of(ch: str) -> str | None:

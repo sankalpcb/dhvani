@@ -1,6 +1,7 @@
 import numpy as np
 from dhvani.config import SAMPLE_RATE
-from dhvani.segmenter import segment
+from dhvani.ids import segment_id
+from dhvani.segmenter import FRAME_MS, segment
 
 
 def _speech(seconds):
@@ -43,6 +44,32 @@ def test_segments_are_time_ordered_and_non_overlapping():
     segs = segment(_pcm(audio))
     for a, b in zip(segs, segs[1:]):
         assert a.t_end_ms <= b.t_start_ms
+
+
+def test_trailing_subthreshold_silence_does_not_extend_segment():
+    """Regression for Finding 1: `_runs` must not fold trailing silence shorter
+    than MIN_SILENCE_MS into the final run. If it did, identical speech with
+    different trailing silence would hash to different segment_ids, silently
+    breaking the content-addressed dedup cache."""
+    audio = np.concatenate([_speech(2.0), _silence(0.2)])
+    segs = segment(_pcm(audio))
+    assert len(segs) == 1
+    # Speech ends at exactly 2000ms. VAD operates at FRAME_MS granularity, so the
+    # boundary may round up by at most one frame (the speech/silence-mixed frame),
+    # but must not absorb the full 200ms of trailing silence.
+    assert 2000 <= segs[0].t_end_ms <= 2000 + FRAME_MS
+
+
+def test_segment_pcm_matches_source_slice_and_rehashes_to_same_id():
+    audio = np.concatenate([_silence(0.5), _speech(3.0), _silence(0.5)])
+    pcm = _pcm(audio)
+    segs = segment(pcm)
+    assert len(segs) == 1
+    seg = segs[0]
+    start_sample = seg.t_start_ms * SAMPLE_RATE // 1000
+    end_sample = seg.t_end_ms * SAMPLE_RATE // 1000
+    assert np.array_equal(seg.pcm, pcm[start_sample:end_sample])
+    assert segment_id(seg.pcm) == seg.segment_id
 
 
 def test_segment_ids_are_populated_and_unique():

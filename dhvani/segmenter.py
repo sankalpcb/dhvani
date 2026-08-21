@@ -46,11 +46,14 @@ def _runs(voiced: np.ndarray, gap_frames: int) -> list[tuple[int, int]]:
                 runs.append((start, i - silence + 1))
                 start = None
     if start is not None:
-        runs.append((start, len(voiced)))
+        runs.append((start, len(voiced) - silence))
     return runs
 
 
-def segment(pcm: np.ndarray, min_ms: int = 2000, max_ms: int = 8000) -> list[Segment]:
+# No minimum-duration filter here: splitting is the segmenter's job, filtering is the
+# scorer's. Task 5's `short_segment` risk feature flags segments under 1500ms as
+# higher-risk — dropping short segments here would make that feature permanently dead.
+def segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]:
     """Split int16 PCM into caption-sized segments. Deterministic."""
     frame_len = SAMPLE_RATE * FRAME_MS // 1000
     voiced = _voiced_frames(pcm, frame_len)

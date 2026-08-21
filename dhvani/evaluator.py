@@ -8,10 +8,15 @@ Prior art: Google Research, "Transliteration based approaches to improve
 code-switched speech recognition performance". We adopt the metric; we do not
 claim it.
 
-Known limitation: this reduces but does not eliminate the penalty for
-Latin-vs-Indic renderings of English loanwords, since romanized Malayalam of
-"deployment" does not match English spelling. Removing that entirely requires a
-phonetic distance or a loanword lexicon — out of scope for Phase 1.
+Known limitation: for an English loanword rendered in Indic script, toWER may
+not reduce the penalty at all — romanized Malayalam of "deployment" does not
+match the Latin spelling "deployment", so a benign script flip and a genuine
+semantic corruption of that same loanword can score identically. Native words
+that appear in different Indic scripts DO collapse correctly (transliteration
+converges on a shared ITRANS spelling); this limitation is specific to
+Latin-vs-Indic renderings of the same English loanword. Closing that gap
+entirely requires a phonetic distance or a loanword lexicon — out of scope for
+Phase 1.
 """
 
 from collections import Counter

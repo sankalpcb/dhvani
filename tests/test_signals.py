@@ -38,6 +38,13 @@ def test_romanization_smell_flags_non_words():
     assert romanization_smell("thh dplymnt zz xqk") > 0.5
 
 
+def test_romanization_smell_accepts_y_vowel_words():
+    # Words with 'y' as a vowel should not be flagged as suspicious.
+    assert romanization_smell("why do you fly my sky") == 0.0
+    # Verify the feature still works on genuinely suspicious text.
+    assert romanization_smell("thh dplymnt zz xqk") > 0.5
+
+
 def test_code_mixing_index_is_zero_for_monolingual():
     assert code_mixing_index("i fixed the bug today") == 0.0
 

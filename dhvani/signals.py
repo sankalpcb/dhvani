@@ -14,7 +14,7 @@ _INDIC_SCRIPTS = (
     "TAMIL", "TELUGU", "BENGALI", "GUJARATI", "ORIYA", "GURMUKHI",
 )
 
-_VOWELS = set("aeiou")
+_VOWELS = set("aeiouy")
 
 
 def script_of(ch: str) -> str | None:
@@ -29,7 +29,13 @@ def script_of(ch: str) -> str | None:
 
 
 def script_mix_entropy(text: str) -> float:
-    """Normalized Shannon entropy over script blocks. 0.0 = single script."""
+    """Normalized Shannon entropy over script blocks. 0.0 = single script.
+
+    Normalized by log2(number of observed scripts), so any perfectly balanced
+    mix of N scripts saturates at 1.0 regardless of N. This is an accepted
+    limitation because the target domain is predominantly two-script mixing
+    (Indic language + Latin/English).
+    """
     counts = Counter(s for ch in text if (s := script_of(ch)) is not None)
     total = sum(counts.values())
     if total == 0 or len(counts) <= 1:
@@ -42,7 +48,8 @@ def romanization_smell(text: str) -> float:
     """Fraction of Latin tokens that look like neither English nor romanized Indic.
 
     Heuristic: a plausible word has at least one vowel and no run of four
-    or more consonants.
+    or more consonants. Note: the 4+ consonant check still false-positives on
+    rare English words like "strengths" and "twelfths"; this is tolerated.
     """
     tokens = [t for t in re.findall(r"[A-Za-z]+", text)]
     if not tokens:

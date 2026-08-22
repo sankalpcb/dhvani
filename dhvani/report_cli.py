@@ -21,12 +21,26 @@ def main(argv=None) -> int:
     from dhvani.pipeline import TrackEntry
 
     with open(track_path, encoding="utf-8") as fh:
-        entries = [TrackEntry(**row) for row in json.load(fh)]
+        try:
+            track_rows = json.load(fh)
+        except json.JSONDecodeError as exc:
+            print(f"malformed JSON in {track_path}: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        entries = [TrackEntry(**row) for row in track_rows]
+    except TypeError as exc:
+        print(f"malformed track row in {track_path}: {exc}", file=sys.stderr)
+        return 1
 
     delta_table = {}
     if os.path.exists(table_path):
         with open(table_path, encoding="utf-8") as fh:
-            delta_table = json.load(fh)
+            try:
+                delta_table = json.load(fh)
+            except json.JSONDecodeError as exc:
+                print(f"malformed JSON in {table_path}: {exc}", file=sys.stderr)
+                return 1
 
     print("# Dhvani cost/quality frontier\n")
     print(render_markdown(frontier(entries, delta_table, BUDGETS)))

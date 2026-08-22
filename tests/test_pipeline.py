@@ -9,11 +9,19 @@ from dhvani.store import Store
 class StubTier0:
     name = "tier0"
 
+    def __init__(self, lang="hi", text="नमस्ते world"):
+        self.lang = lang
+        self.text = text
+
+    @property
+    def variant_key(self):
+        return f"lang={self.lang};model_id=stub"
+
     def cost_per_call(self, segment):
         return 0.0
 
     def transcribe(self, segment):
-        return {"text": "नमस्ते world", "signals": {"ctc_rnnt_disagreement": 0.1}}
+        return {"text": self.text, "signals": {"ctc_rnnt_disagreement": 0.1}}
 
 
 def _audio(seconds=6.0):
@@ -81,3 +89,43 @@ def test_zero_budget_still_produces_a_full_track(store):
     """Graceful degradation."""
     entries = run(_audio(), "vid1", StubTier0(), store, {}, budget_usd=0.0)
     assert len(entries) >= 1
+
+
+# --- Fix round 2, I2/I3: the cache must not ignore lang / model_id / policy ---
+
+def test_changing_lang_does_not_serve_the_other_langs_cached_text(store):
+    """The demonstrated defect: run with lang="hi", then with lang="ml",
+    and the second run returned the Hindi transcript straight from cache
+    -- --lang was silently a no-op, because segment_id hashes PCM alone
+    and the hypothesis key was just (segment_id, "tier0")."""
+    hindi = run(_audio(), "vid1", StubTier0("hi", "नमस्ते"), store, {}, budget_usd=0.0)
+    malayalam = run(_audio(), "vid1", StubTier0("ml", "നമസ്കാരം"), store, {}, budget_usd=0.0)
+
+    assert [e.text for e in hindi] == ["नमस्ते"] * len(hindi)
+    assert [e.text for e in malayalam] == ["നമസ്കാരം"] * len(malayalam)
+
+
+def test_bumping_policy_id_forces_a_re_transcribe(store, monkeypatch):
+    """POLICY_ID is the documented cache-invalidation lever, so bumping it
+    must make the pipeline call the backend again instead of serving the
+    stale hypothesis."""
+    class CountingTier0(StubTier0):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = 0
+
+        def transcribe(self, segment):
+            self.calls += 1
+            return super().transcribe(segment)
+
+    backend = CountingTier0()
+    run(_audio(), "vid1", backend, store, {}, budget_usd=0.0)
+    after_first = backend.calls
+    assert after_first >= 1
+
+    run(_audio(), "vid1", backend, store, {}, budget_usd=0.0)
+    assert backend.calls == after_first, "same policy must hit the cache"
+
+    monkeypatch.setattr("dhvani.config.POLICY_ID", "p-bumped")
+    run(_audio(), "vid1", backend, store, {}, budget_usd=0.0)
+    assert backend.calls == after_first * 2, "a bumped POLICY_ID must re-transcribe"

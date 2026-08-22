@@ -51,6 +51,14 @@ class Tier0Conformer:
         self.model_id = model_id
 
     @property
+    def variant_key(self) -> str:
+        """Everything about this backend that changes the output for
+        byte-identical PCM. lang and model_id both do, so a hypothesis
+        cached (or a fixture recorded) under one must never be served for
+        the other — see FIX ROUND 2 (I2/I3) in backends/base.py."""
+        return f"lang={self.lang};model_id={self.model_id}"
+
+    @property
     def _model(self):
         """The model to call, loading and caching it on first access.
 

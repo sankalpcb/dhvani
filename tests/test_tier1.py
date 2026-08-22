@@ -59,6 +59,20 @@ def test_transcribe_calls_the_client_once():
     assert client.calls == 1
 
 
+def test_variant_key_captures_everything_that_changes_the_output():
+    """Fix round 2 (I2): lang and recognizer both change what Chirp
+    returns for byte-identical PCM, so both must be in the variant
+    identity that keys the cache and the fixture path."""
+    base = Tier1Chirp(client=StubClient(), lang="hi-IN")
+    other_lang = Tier1Chirp(client=StubClient(), lang="ml-IN")
+    other_recognizer = Tier1Chirp(client=StubClient(), lang="hi-IN",
+                                  recognizer="projects/p/locations/global/recognizers/r")
+
+    assert base.variant_key == Tier1Chirp(client=StubClient(), lang="hi-IN").variant_key
+    assert base.variant_key != other_lang.variant_key
+    assert base.variant_key != other_recognizer.variant_key
+
+
 def test_construction_with_no_client_succeeds_without_google_cloud_speech():
     """G5 regression guard, mirroring Task 9's Tier0Conformer guard. A
     stranger who clones the repo and runs the offline replay workflow has

@@ -89,6 +89,13 @@ class Tier1Chirp:
         self.recognizer = recognizer
 
     @property
+    def variant_key(self) -> str:
+        """Everything about this backend that changes the output for
+        byte-identical PCM. lang and recognizer both do — see FIX ROUND 2
+        (I2/I3) in backends/base.py."""
+        return f"lang={self.lang};recognizer={self.recognizer}"
+
+    @property
     def _client(self):
         """The client to call, constructing and caching it on first access.
 

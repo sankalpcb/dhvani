@@ -12,6 +12,15 @@ above the ceiling with neither call having raised. dhvani.cli's --db
 defaults to a fixed shared path, so two concurrent runs share exactly that
 file. See tests/test_store.py::test_two_step_check_then_record_is_not_atomic,
 which pins the broken sequence, and the concurrency test beside it.
+
+FIX ROUND 2 (I2/I3): the hypothesis cache key is no longer the bare tier.
+The `tier` column now carries a composite built by
+ids.hypothesis_key(tier, variant_key) — tier + POLICY_ID + a backend
+variant string. Byte-identical PCM decoded with a different lang or
+model_id is a different hypothesis and must not collide, and bumping
+POLICY_ID must actually invalidate what is cached. The composite still
+lives in the same column, so PRIMARY KEY (segment_id, tier) keeps
+enforcing idempotency unchanged.
 """
 
 import json
@@ -19,6 +28,7 @@ import sqlite3
 import time
 
 from dhvani.config import MAX_SPEND_USD
+from dhvani.ids import hypothesis_key
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (
@@ -83,23 +93,30 @@ class Store:
         )
         self.conn.commit()
 
-    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd) -> bool:
-        """Returns True if newly inserted, False if already present (no-op)."""
+    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd,
+                       variant_key: str = "") -> bool:
+        """Returns True if newly inserted, False if already present (no-op).
+
+        variant_key identifies the backend configuration that produced this
+        text (lang, model_id, recognizer). The store — not the caller —
+        folds it and POLICY_ID into the stored key, so no caller can
+        forget to and silently reintroduce the collision.
+        """
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO hypotheses "
             "(segment_id, tier, text, signals_json, cost_usd, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (segment_id, tier, text, json.dumps(signals, sort_keys=True),
-             cost_usd, int(time.time())),
+            (segment_id, hypothesis_key(tier, variant_key), text,
+             json.dumps(signals, sort_keys=True), cost_usd, int(time.time())),
         )
         self.conn.commit()
         return cur.rowcount == 1
 
-    def get_hypothesis(self, segment_id, tier):
+    def get_hypothesis(self, segment_id, tier, variant_key: str = ""):
         row = self.conn.execute(
             "SELECT text, signals_json, cost_usd FROM hypotheses "
             "WHERE segment_id = ? AND tier = ?",
-            (segment_id, tier),
+            (segment_id, hypothesis_key(tier, variant_key)),
         ).fetchone()
         if row is None:
             return None

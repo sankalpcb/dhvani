@@ -12,8 +12,10 @@ import numpy as np
 import soundfile as sf
 
 from dhvani.audio import normalize
+from dhvani.backends.tier0_conformer import Tier0Conformer
 from dhvani.cli import main
 from dhvani.config import SAMPLE_RATE
+from dhvani.ids import variant_slug
 from dhvani.segmenter import segment as split
 
 
@@ -41,8 +43,12 @@ def test_cli_replay_mode_runs_end_to_end_without_torch(tmp_path, capsys):
     segments = split(pcm)
     assert segments, "expected at least one voiced segment from the test tone"
 
+    # Fixtures are keyed by tier AND backend variant AND POLICY_ID (fix
+    # round 2, I2/I3), so build the same backend the CLI will build and
+    # ask it where its fixtures live rather than hardcoding a layout.
     fixtures_dir = tmp_path / "fixtures"
-    tier0_dir = fixtures_dir / "tier0"
+    tier0_dir = (fixtures_dir / "tier0"
+                 / variant_slug(Tier0Conformer(lang="hi").variant_key))
     tier0_dir.mkdir(parents=True)
     for seg in segments:
         (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({

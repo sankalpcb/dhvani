@@ -6,6 +6,7 @@ import pytest
 
 from dhvani.backends.base import Recorded, FixtureMissing
 from dhvani.config import MAX_SPEND_USD
+from dhvani.ids import variant_slug
 from dhvani.segmenter import Segment
 from dhvani.store import Store, BudgetExceeded
 
@@ -13,8 +14,9 @@ from dhvani.store import Store, BudgetExceeded
 class FakeBackend:
     name = "fake"
 
-    def __init__(self):
+    def __init__(self, variant_key="lang=hi"):
         self.calls = 0
+        self.variant_key = variant_key
 
     def cost_per_call(self, segment):
         return 0.5
@@ -29,6 +31,7 @@ class RaisingBackend:
     before the call so a crash cannot leave money spent but unrecorded."""
 
     name = "fake"
+    variant_key = "lang=hi"
 
     def cost_per_call(self, segment):
         return 0.5
@@ -48,8 +51,41 @@ def test_record_mode_writes_a_fixture(tmp_path):
         b = Recorded(inner, mode="record", fixture_dir=str(tmp_path), store=store)
         out = b.transcribe(_seg())
         assert out["text"] == "hello-1"
-        written = tmp_path / "fake" / f"{'a' * 64}.json"
+        written = (tmp_path / "fake" / variant_slug(inner.variant_key)
+                   / f"{'a' * 64}.json")
         assert json.loads(written.read_text())["text"] == "hello-1"
+
+
+# --- Fix round 2, I2/I3: fixtures are keyed by variant and POLICY_ID too ---
+
+def test_two_backend_variants_do_not_share_a_fixture(tmp_path):
+    """Fixtures used to be keyed on {segment_id}.json under the tier name
+    alone, so replaying with a different lang silently returned the other
+    lang's recorded response."""
+    with Store(str(tmp_path / "t.db")) as store:
+        hi = FakeBackend(variant_key="lang=hi")
+        Recorded(hi, "record", str(tmp_path), store).transcribe(_seg())
+
+    ml = Recorded(FakeBackend(variant_key="lang=ml"), "replay", str(tmp_path), None)
+    with pytest.raises(FixtureMissing):
+        ml.transcribe(_seg())
+
+    replayed = Recorded(FakeBackend(variant_key="lang=hi"), "replay",
+                        str(tmp_path), None)
+    assert replayed.transcribe(_seg())["text"] == "hello-1"
+
+
+def test_bumping_policy_id_invalidates_fixtures(tmp_path, monkeypatch):
+    """Bumping POLICY_ID must invalidate recorded fixtures, not just
+    hypotheses -- and it must still be a hard error, never a fallback to
+    live."""
+    with Store(str(tmp_path / "t.db")) as store:
+        Recorded(FakeBackend(), "record", str(tmp_path), store).transcribe(_seg())
+
+    monkeypatch.setattr("dhvani.config.POLICY_ID", "p-bumped")
+    stale = Recorded(FakeBackend(), "replay", str(tmp_path), None)
+    with pytest.raises(FixtureMissing):
+        stale.transcribe(_seg())
 
 
 def test_replay_mode_reads_fixture_without_calling_inner(tmp_path):

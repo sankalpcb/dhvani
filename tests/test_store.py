@@ -31,6 +31,50 @@ def test_signals_round_trip(store):
     assert store.get_hypothesis("abc", "tier0")["signals"] == {"entropy": 0.5}
 
 
+# --- Fix round 2, I2/I3: the cache key carries variant and POLICY_ID ---
+
+def test_two_backend_variants_do_not_share_a_cache_entry(store):
+    """Demonstrated defect: a run with lang="hi" followed by a run with
+    lang="ml" returned the Hindi transcript from cache, making --lang
+    silently a no-op. segment_id hashes PCM alone, so the variant has to
+    be part of the hypothesis key."""
+    store.put_segment("abc", "vid1", 0, 3000, "hi")
+    store.put_hypothesis("abc", "tier0", "hindi text", {}, 0.0,
+                         variant_key="lang=hi")
+
+    assert store.get_hypothesis("abc", "tier0", variant_key="lang=ml") is None
+    assert store.get_hypothesis("abc", "tier0",
+                                variant_key="lang=hi")["text"] == "hindi text"
+
+
+def test_both_variants_coexist_and_stay_idempotent(store):
+    """The variant is folded into the tier column, so PRIMARY KEY
+    (segment_id, tier) still enforces idempotency per variant -- the key
+    is not weakened, only made more specific."""
+    store.put_segment("abc", "vid1", 0, 3000, "hi")
+    assert store.put_hypothesis("abc", "tier0", "hindi", {}, 0.0,
+                                variant_key="lang=hi") is True
+    assert store.put_hypothesis("abc", "tier0", "malayalam", {}, 0.0,
+                                variant_key="lang=ml") is True
+    assert store.put_hypothesis("abc", "tier0", "DIFFERENT", {}, 0.0,
+                                variant_key="lang=hi") is False
+
+    assert store.get_hypothesis("abc", "tier0", variant_key="lang=hi")["text"] == "hindi"
+    assert store.get_hypothesis("abc", "tier0", variant_key="lang=ml")["text"] == "malayalam"
+
+
+def test_bumping_policy_id_invalidates_cached_hypotheses(store, monkeypatch):
+    """POLICY_ID's own docstring, spec §3.1 and invariant I5 all describe
+    it as the cache-invalidation mechanism. Before this fix it had zero
+    call sites, so bumping it invalidated nothing."""
+    store.put_segment("abc", "vid1", 0, 3000, "hi")
+    store.put_hypothesis("abc", "tier0", "stale", {}, 0.0, variant_key="lang=hi")
+    assert store.get_hypothesis("abc", "tier0", variant_key="lang=hi") is not None
+
+    monkeypatch.setattr("dhvani.config.POLICY_ID", "p-bumped")
+    assert store.get_hypothesis("abc", "tier0", variant_key="lang=hi") is None
+
+
 def test_spend_accumulates(store):
     store.record_spend("tier1", 1.5)
     store.record_spend("tier1", 2.25)

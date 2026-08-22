@@ -50,12 +50,17 @@ def run(pcm: np.ndarray, source_id: str, tier0, store,
     for seg in segments:
         store.put_segment(seg.segment_id, source_id, seg.t_start_ms, seg.t_end_ms)
 
-        cached = store.get_hypothesis(seg.segment_id, "tier0")
+        # The backend's variant identity (lang, model_id, ...) is part of
+        # the cache key: identical PCM decoded under a different config is
+        # a different hypothesis. See FIX ROUND 2 (I2/I3) in store.py.
+        variant = tier0.variant_key
+        cached = store.get_hypothesis(seg.segment_id, "tier0", variant_key=variant)
         if cached is None:
             result = tier0.transcribe(seg)
             store.put_hypothesis(
                 seg.segment_id, "tier0", result["text"],
                 result["signals"], tier0.cost_per_call(seg),
+                variant_key=variant,
             )
         else:
             result = {"text": cached["text"], "signals": cached["signals"]}

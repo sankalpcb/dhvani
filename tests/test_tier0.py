@@ -47,6 +47,21 @@ def test_disagreement_is_bounded():
     assert disagreement("", "") == 0.0
 
 
+def test_variant_key_captures_everything_that_changes_the_output():
+    """Fix round 2 (I2): lang and model_id both change the text produced
+    for byte-identical PCM, so both must be in the variant identity that
+    keys the cache and the fixture path."""
+    base = Tier0Conformer(model=StubModel("a", "a"), lang="hi")
+    other_lang = Tier0Conformer(model=StubModel("a", "a"), lang="ml")
+    other_model = Tier0Conformer(model=StubModel("a", "a"), lang="hi",
+                                 model_id="someone-else/other-model")
+
+    assert base.variant_key == Tier0Conformer(model=StubModel("a", "a"),
+                                              lang="hi").variant_key
+    assert base.variant_key != other_lang.variant_key
+    assert base.variant_key != other_model.variant_key
+
+
 def test_construction_with_no_model_succeeds_without_torch():
     """G5 regression guard. A stranger who clones the repo and runs the
     offline replay workflow has no torch/transformers installed and no HF

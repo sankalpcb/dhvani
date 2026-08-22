@@ -30,6 +30,14 @@ call is now the single atomic store.reserve_spend(), which does the check
 and the insert in ONE statement. The before-the-call ordering above is
 preserved: the reservation completes before inner.transcribe() runs.
 
+FIX ROUND 2 (I2/I3): fixtures were keyed on {segment_id}.json under the
+inner backend's name alone, and segment_id hashes PCM only — so recording
+with lang="hi" and replaying with lang="ml" silently returned the Hindi
+response, and bumping POLICY_ID invalidated nothing. Fixture paths now
+carry ids.variant_slug(variant_key), which folds in POLICY_ID. A stale
+variant is a missing fixture, and a missing fixture is still a hard error:
+replay never falls back to live.
+
 FIX ROUND 1: a review found that Recorded(inner, mode="live", store=None)
 constructed fine and then skipped both check_budget() and record_spend()
 entirely, calling the paid backend with zero enforcement and zero
@@ -42,6 +50,8 @@ import json
 import os
 from typing import Literal, Protocol, runtime_checkable
 
+from dhvani.ids import variant_slug
+
 Mode = Literal["record", "replay", "live"]
 
 
@@ -52,6 +62,14 @@ class FixtureMissing(RuntimeError):
 @runtime_checkable
 class Backend(Protocol):
     name: str
+
+    variant_key: str
+    """Short, stable string capturing everything about this backend's
+    configuration that changes the output for byte-identical PCM (lang,
+    model_id, recognizer). See FIX ROUND 2 (I2/I3) in the module
+    docstring. Required, not optional: a backend that omits it would
+    silently share cache entries and fixtures with every other
+    configuration of the same tier."""
 
     def cost_per_call(self, segment) -> float: ...
 
@@ -76,9 +94,20 @@ class Recorded:
         self.fixture_dir = fixture_dir
         self.store = store
         self.name = inner.name
+        # Read eagerly so a backend missing the required protocol member
+        # fails loudly at construction, not silently at cache-lookup time.
+        self.variant_key = inner.variant_key
 
     def _path(self, segment) -> str:
-        return os.path.join(self.fixture_dir, self.inner.name, f"{segment.segment_id}.json")
+        # The variant slug is a path component, so two configurations of
+        # the same tier (different lang, model_id, recognizer) and two
+        # different POLICY_IDs cannot collide on one fixture file.
+        return os.path.join(
+            self.fixture_dir,
+            self.inner.name,
+            variant_slug(self.variant_key),
+            f"{segment.segment_id}.json",
+        )
 
     def cost_per_call(self, segment) -> float:
         if self.mode == "replay":

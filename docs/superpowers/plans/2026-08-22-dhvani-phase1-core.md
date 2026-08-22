@@ -2011,8 +2011,11 @@ def build(rows: list[dict]) -> dict:
 """Cost/quality frontier: the headline artifact."""
 
 from dhvani.router import Candidate, delta_for, plan
+from dhvani.backends.tier1_chirp import cost_for_duration_ms
 
-TIER1_USD_PER_MIN = 0.003
+# NOTE (final review I1): this file must NOT define its own rate. Pricing lives
+# in tier1_chirp.cost_for_duration_ms so the frontier and the paid backend can
+# never drift. tests/test_report.py guards against reintroducing a local rate.
 
 
 def frontier(entries, delta_table: dict, budgets: list[float]) -> list[dict]:

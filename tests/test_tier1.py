@@ -4,6 +4,7 @@ import pytest
 from dhvani.backends.base import Backend
 from dhvani.backends.tier1_chirp import (
     Tier1Chirp, USD_PER_MIN_DYNAMIC_BATCH, USD_PER_MIN_STANDARD,
+    BILLING_INCREMENT_SEC,
 )
 from dhvani.segmenter import Segment
 
@@ -28,11 +29,15 @@ def test_satisfies_backend_protocol():
 
 
 def test_one_minute_costs_the_dynamic_batch_rate():
+    # 60000ms is already a whole multiple of BILLING_INCREMENT_SEC (15s),
+    # so rounding up (fix round 1) does not change this figure.
     assert Tier1Chirp(client=StubClient()).cost_per_call(_seg(60000)) == \
         pytest.approx(USD_PER_MIN_DYNAMIC_BATCH)
 
 
 def test_cost_scales_with_duration():
+    # 30000ms is also a whole multiple of 15s, so this still holds after
+    # fix round 1's rounding was introduced.
     b = Tier1Chirp(client=StubClient())
     assert b.cost_per_call(_seg(30000)) == pytest.approx(USD_PER_MIN_DYNAMIC_BATCH / 2)
 
@@ -74,8 +79,80 @@ def test_construction_never_calls_default_client(monkeypatch):
     environment where the cloud extra happens to be installed."""
     import dhvani.backends.tier1_chirp as mod
 
-    def _boom():
+    def _boom(recognizer=""):
         raise AssertionError("__init__ must not call _default_client()")
 
     monkeypatch.setattr(mod, "_default_client", _boom)
     Tier1Chirp()  # must not raise
+
+
+# --- Fix round 1, Finding 1: billing rounds up to BILLING_INCREMENT_SEC ---
+
+def test_cost_rounds_up_to_the_billing_increment():
+    """A segment shorter than one billing increment must be billed as a
+    full increment, not its exact wall-clock duration. Google Cloud
+    Speech-to-Text has historically billed synchronous/batch requests in
+    whole 15s increments per request, and charging exact duration would
+    understate cost -- Recorded (base.py) checks this exact number against
+    the USD 20 ceiling before every live call, so understating it would
+    let real spend breach the ceiling while the ledger still reads under
+    budget. This is the whole point of the fix."""
+    b = Tier1Chirp(client=StubClient())
+    sub_increment_cost = b.cost_per_call(_seg(2000))
+    full_increment_cost = b.cost_per_call(_seg(BILLING_INCREMENT_SEC * 1000))
+    exact_duration_cost = USD_PER_MIN_DYNAMIC_BATCH * (2000 / 60000.0)
+
+    assert sub_increment_cost == pytest.approx(full_increment_cost)
+    assert sub_increment_cost == pytest.approx(
+        USD_PER_MIN_DYNAMIC_BATCH * BILLING_INCREMENT_SEC / 60.0
+    )
+    assert sub_increment_cost != pytest.approx(exact_duration_cost)
+
+
+def test_cost_does_not_round_up_an_exact_multiple():
+    """A duration that already lands exactly on a billing increment
+    boundary must not be bumped to the next one -- rounding up is ceiling
+    division, not "always add an increment"."""
+    b = Tier1Chirp(client=StubClient())
+    exact = b.cost_per_call(_seg(BILLING_INCREMENT_SEC * 1000))
+    assert exact == pytest.approx(USD_PER_MIN_DYNAMIC_BATCH * BILLING_INCREMENT_SEC / 60.0)
+
+    just_over = b.cost_per_call(_seg(BILLING_INCREMENT_SEC * 1000 + 1))
+    assert just_over == pytest.approx(
+        USD_PER_MIN_DYNAMIC_BATCH * (2 * BILLING_INCREMENT_SEC) / 60.0
+    )
+
+
+# --- Fix round 1, Finding 2: the recognizer parameter must do something ---
+
+def test_recognizer_path_uses_configured_recognizer_when_given():
+    """When a caller configures a real recognizer resource ID, it must be
+    used verbatim rather than silently ignored in favor of the wildcard
+    path. _recognizer_path has no google-cloud imports, so it is testable
+    directly without the `cloud` extra installed -- it is exactly the
+    logic _default_client's real request-building calls at transcribe
+    time."""
+    import dhvani.backends.tier1_chirp as mod
+
+    configured = "projects/my-proj/locations/global/recognizers/my-recognizer"
+    assert mod._recognizer_path(configured) == configured
+
+
+def test_recognizer_path_falls_back_to_wildcard_when_empty(monkeypatch):
+    """The default (empty recognizer) must fall back to the previous
+    wildcard-per-project path, built via _project()."""
+    import dhvani.backends.tier1_chirp as mod
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    assert mod._recognizer_path("") == "projects/test-project/locations/global/recognizers/_"
+
+
+def test_recognizer_path_fails_closed_without_project_when_empty(monkeypatch):
+    """The empty-recognizer fallback still fails closed if
+    GOOGLE_CLOUD_PROJECT is unset -- unchanged _project() behavior, now
+    reachable through the new _recognizer_path indirection too."""
+    import dhvani.backends.tier1_chirp as mod
+
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    with pytest.raises(RuntimeError):
+        mod._recognizer_path("")

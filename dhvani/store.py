@@ -57,7 +57,30 @@ CREATE TABLE IF NOT EXISTS spend (
   cost_usd   REAL NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+  job_id       TEXT PRIMARY KEY,
+  tier         TEXT NOT NULL,
+  variant_key  TEXT NOT NULL,
+  state        TEXT NOT NULL,
+  segment_ids  TEXT NOT NULL,
+  submitted_at INTEGER NOT NULL,
+  settled_at   INTEGER,
+  attempts     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS tracks (
+  source_id    TEXT NOT NULL,
+  version      INTEGER NOT NULL,
+  policy_id    TEXT NOT NULL,
+  content_json TEXT NOT NULL,
+  cost_usd     REAL NOT NULL,
+  created_at   INTEGER NOT NULL,
+  PRIMARY KEY (source_id, version)
+);
 """
+
+JOB_STATES = ("pending", "running", "done", "failed")
 
 
 class BudgetExceeded(RuntimeError):
@@ -188,3 +211,84 @@ class Store:
                 f"call costing ${cost_usd:.4f} would exceed ceiling: "
                 f"${projected:.4f} > ${MAX_SPEND_USD:.2f}"
             )
+
+    def put_job(self, job_id, tier, variant_key, segment_ids) -> bool:
+        """Register a submitted batch. Idempotent: re-registering is a no-op."""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO jobs "
+            "(job_id, tier, variant_key, state, segment_ids, submitted_at, attempts) "
+            "VALUES (?, ?, ?, 'pending', ?, ?, 0)",
+            (job_id, tier, variant_key, json.dumps(list(segment_ids)),
+             int(time.time())),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def get_job(self, job_id):
+        row = self.conn.execute(
+            "SELECT job_id, tier, variant_key, state, segment_ids, attempts "
+            "FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": row["job_id"], "tier": row["tier"],
+            "variant_key": row["variant_key"], "state": row["state"],
+            "segment_ids": json.loads(row["segment_ids"]),
+            "attempts": row["attempts"],
+        }
+
+    def set_job_state(self, job_id: str, state: str) -> None:
+        if state not in JOB_STATES:
+            raise ValueError(f"unknown state: {state!r}; expected one of {JOB_STATES}")
+        settled = int(time.time()) if state in ("done", "failed") else None
+        self.conn.execute(
+            "UPDATE jobs SET state = ?, settled_at = ? WHERE job_id = ?",
+            (state, settled, job_id),
+        )
+        self.conn.commit()
+
+    def bump_job_attempts(self, job_id: str) -> int:
+        self.conn.execute(
+            "UPDATE jobs SET attempts = attempts + 1 WHERE job_id = ?", (job_id,)
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT attempts FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        return int(row["attempts"]) if row else 0
+
+    def open_jobs(self):
+        """Jobs still awaiting results, ordered by job_id for determinism."""
+        rows = self.conn.execute(
+            "SELECT job_id FROM jobs WHERE state IN ('pending','running') "
+            "ORDER BY job_id"
+        ).fetchall()
+        return [self.get_job(r["job_id"]) for r in rows]
+
+    def put_track(self, source_id, version, policy_id, content_json, cost_usd) -> bool:
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO tracks "
+            "(source_id, version, policy_id, content_json, cost_usd, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (source_id, version, policy_id, content_json, cost_usd, int(time.time())),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def get_track(self, source_id, version):
+        row = self.conn.execute(
+            "SELECT content_json, policy_id, cost_usd FROM tracks "
+            "WHERE source_id = ? AND version = ?", (source_id, version)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"content_json": row["content_json"], "policy_id": row["policy_id"],
+                "cost_usd": row["cost_usd"]}
+
+    def latest_track_version(self, source_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM tracks WHERE source_id = ?",
+            (source_id,)
+        ).fetchone()
+        return int(row["v"])

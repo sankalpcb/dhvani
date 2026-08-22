@@ -2269,6 +2269,12 @@ unsupported for Chirp 3, set USD_PER_MIN_DYNAMIC_BATCH = USD_PER_MIN_STANDARD.
 USD_PER_MIN_DYNAMIC_BATCH = 0.003
 USD_PER_MIN_STANDARD = 0.016
 
+# Google STT has historically billed in whole 15s increments, rounded up per
+# request. UNVERIFIED (spike 2 blocked). cost_per_call() rounds duration UP to
+# this before pricing: an overstated cost fails safe, an understated one lets
+# real spend breach the USD 20 ceiling while the ledger still reads under budget.
+BILLING_INCREMENT_SEC = 15
+
 
 class Tier1Chirp:
     name = "tier1"
@@ -2279,8 +2285,10 @@ class Tier1Chirp:
         self.recognizer = recognizer
 
     def cost_per_call(self, segment) -> float:
-        minutes = (segment.t_end_ms - segment.t_start_ms) / 60000.0
-        return USD_PER_MIN_DYNAMIC_BATCH * minutes
+        duration_ms = segment.t_end_ms - segment.t_start_ms
+        increment_ms = BILLING_INCREMENT_SEC * 1000
+        billable_ms = -(-duration_ms // increment_ms) * increment_ms  # ceil
+        return USD_PER_MIN_DYNAMIC_BATCH * billable_ms / 60000.0
 
     def transcribe(self, segment) -> dict:
         text = self._client.recognize_pcm(segment.pcm, self.lang)

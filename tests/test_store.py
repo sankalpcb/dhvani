@@ -1,4 +1,7 @@
+import threading
+
 import pytest
+from dhvani.config import MAX_SPEND_USD
 from dhvani.store import Store, BudgetExceeded
 
 
@@ -44,3 +47,142 @@ def test_check_budget_fails_closed_at_ceiling(store):
     store.record_spend("tier1", 19.9)
     with pytest.raises(BudgetExceeded, match="would exceed"):
         store.check_budget(0.5)
+
+
+# --- Fix round 2, C1: the ceiling must survive concurrent reservations ---
+
+def test_two_step_check_then_record_is_not_atomic(tmp_path):
+    """Characterizes the C1 defect that reserve_spend() exists to close.
+
+    check_budget() and record_spend() are two separate autocommitted
+    transactions. Two Store handles on the same DB file can both read the
+    same stale total, both conclude there is room, and both then record --
+    so the ledger ends up OVER the ceiling with neither call having
+    raised. This is not hypothetical: dhvani.cli's --db defaults to a
+    fixed shared path, so two concurrent runs share exactly this file.
+
+    This test deliberately pins the broken behavior of the two-step
+    sequence rather than asserting it is safe: it is the reason callers
+    that spend money must use reserve_spend() instead. If someone later
+    makes the two-step path atomic too, this test failing is the correct
+    signal to delete it.
+    """
+    db = str(tmp_path / "shared.db")
+    with Store(db) as a, Store(db) as b:
+        a.record_spend("tier1", MAX_SPEND_USD - 0.40)  # ledger at 19.60
+
+        # Interleaved exactly as dhvani.backends.base used to call it.
+        a.check_budget(0.30)   # sees 19.60, projects 19.90 -- passes
+        b.check_budget(0.30)   # sees 19.60 too (stale) -- also passes
+        a.record_spend("tier1", 0.30)
+        b.record_spend("tier1", 0.30)
+
+        assert a.total_spend() > MAX_SPEND_USD, (
+            "expected the non-atomic two-step path to breach the ceiling"
+        )
+
+
+def test_interleaved_reserve_spend_cannot_breach_the_ceiling(tmp_path):
+    """The same interleaving as above, but through reserve_spend().
+
+    Two Store handles on one DB file, the ledger at 19.60, each
+    reservation costing 0.30: the first fits (19.90), the second does not
+    (20.20 > 20.00) and must raise. The ledger must never end above the
+    ceiling.
+    """
+    db = str(tmp_path / "shared.db")
+    with Store(db) as a, Store(db) as b:
+        a.record_spend("tier1", MAX_SPEND_USD - 0.40)
+
+        a.reserve_spend("tier1", 0.30)
+        with pytest.raises(BudgetExceeded):
+            b.reserve_spend("tier1", 0.30)
+
+        assert a.total_spend() <= MAX_SPEND_USD
+        assert b.total_spend() == pytest.approx(MAX_SPEND_USD - 0.10)
+
+
+def test_concurrent_reserve_spend_never_breaches_the_ceiling(tmp_path):
+    """Real concurrency: N threads, N independent Store handles, one DB.
+
+    Every thread waits on a barrier so the reservations are issued as
+    close to simultaneously as the runtime allows, which is precisely the
+    window the old check-then-record sequence lost money in. The ledger
+    starts at 19.60 with a 20.00 ceiling and each reservation costs 0.30,
+    so at most ONE thread can legally win. Whatever the interleaving, the
+    final total must never exceed MAX_SPEND_USD and the number of
+    successful reservations must equal the number of rows actually
+    written.
+    """
+    db = str(tmp_path / "shared.db")
+    n_threads = 8
+    cost = 0.30
+
+    with Store(db) as seed:
+        seed.record_spend("tier1", MAX_SPEND_USD - 0.40)  # ledger at 19.60
+
+    barrier = threading.Barrier(n_threads)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def worker():
+        # Each thread owns its own connection: sqlite3 objects are not
+        # shareable across threads, and separate handles are exactly the
+        # scenario C1 describes.
+        with Store(db) as s:
+            barrier.wait()
+            try:
+                s.reserve_spend("tier1", cost)
+                result = "ok"
+            except BudgetExceeded:
+                result = "refused"
+        with lock:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a worker thread deadlocked"
+
+    granted = outcomes.count("ok")
+    assert len(outcomes) == n_threads
+    assert granted == 1, f"exactly one reservation may fit, got {granted}"
+
+    with Store(db) as check:
+        total = check.total_spend()
+    assert total <= MAX_SPEND_USD, f"ledger breached the ceiling: {total}"
+    assert total == pytest.approx(MAX_SPEND_USD - 0.40 + granted * cost)
+
+
+def test_reserve_spend_allows_landing_exactly_on_the_ceiling(tmp_path):
+    """projected == MAX_SPEND_USD is allowed; only > is refused.
+
+    Same boundary as check_budget's strict '>' comparison, pinned so the
+    atomic path cannot silently drift to '>=' and start refusing a spend
+    that exactly exhausts the budget.
+    """
+    with Store(str(tmp_path / "t.db")) as s:
+        s.record_spend("tier1", MAX_SPEND_USD - 0.5)  # 19.5, exact in binary
+        s.reserve_spend("tier1", 0.5)                 # 19.5 + 0.5 == 20.0
+        assert s.total_spend() == pytest.approx(MAX_SPEND_USD)
+
+
+def test_reserve_spend_refuses_a_hair_over_the_ceiling(tmp_path):
+    with Store(str(tmp_path / "t.db")) as s:
+        s.record_spend("tier1", MAX_SPEND_USD - 0.5)
+        with pytest.raises(BudgetExceeded, match="would exceed"):
+            s.reserve_spend("tier1", 0.5000001)
+        assert s.total_spend() == pytest.approx(MAX_SPEND_USD - 0.5)
+
+
+def test_reserve_spend_records_nothing_when_it_refuses(tmp_path):
+    """A refused reservation must leave the ledger byte-identical."""
+    with Store(str(tmp_path / "t.db")) as s:
+        s.record_spend("tier1", MAX_SPEND_USD)
+        before = s.conn.execute("SELECT COUNT(*) AS n FROM spend").fetchone()["n"]
+        with pytest.raises(BudgetExceeded):
+            s.reserve_spend("tier1", 0.01)
+        after = s.conn.execute("SELECT COUNT(*) AS n FROM spend").fetchone()["n"]
+        assert after == before

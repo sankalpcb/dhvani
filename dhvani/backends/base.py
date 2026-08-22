@@ -2,21 +2,33 @@
 
 Three rules, all fail-closed:
   1. Replay never falls back to live on a cache miss.
-  2. Live calls check the spend ledger before spending anything, and record
-     the spend BEFORE the paid call executes (not after) — see RULING below.
+  2. Live calls atomically reserve the spend — check the ledger and record
+     it in one transaction — BEFORE the paid call executes (not after).
+     See RULING and FIX ROUND 2 below.
   3. Live and record modes both make paid calls to the inner backend, so
      both require a Store — constructing either with store=None raises
      ValueError instead of silently running unmetered. Only replay may omit
      a store, since replay never calls anything.
 
 RULING (overrides an earlier draft of this module): the live path records
-spend before invoking the inner backend, not after. If record_spend() ran
-after inner.transcribe(), a crash between the API call and the record_spend
-call would leave money spent but unrecorded, so total_spend() would
+spend before invoking the inner backend, not after. If the spend were
+recorded after inner.transcribe(), a crash between the API call and the
+record would leave money spent but unrecorded, so total_spend() would
 under-count and the USD 20 ceiling could be breached on restart. Recording
 first is pessimistic accounting — a failed call over-counts, which fails
 safe. Preserving the ceiling matters more than perfectly accurate cost
 attribution.
+
+FIX ROUND 2 (C1): the ordering above was right but insufficient. This
+module called store.check_budget() and store.record_spend() as two
+separate statements, each in its own autocommitted transaction, so two
+Recorded wrappers holding two Store handles on the same DB file could both
+read the same stale total, both pass the check, and both then record —
+ending above the ceiling with neither raising. dhvani.cli's --db defaults
+to a fixed shared path, so this is reachable from the shipped CLI. The
+call is now the single atomic store.reserve_spend(), which does the check
+and the insert in ONE statement. The before-the-call ordering above is
+preserved: the reservation completes before inner.transcribe() runs.
 
 FIX ROUND 1: a review found that Recorded(inner, mode="live", store=None)
 constructed fine and then skipped both check_budget() and record_spend()
@@ -86,13 +98,11 @@ class Recorded:
 
         cost = self.inner.cost_per_call(segment)
         if self.store is not None:
-            self.store.check_budget(cost)
-            # Record spend BEFORE the paid call, not after. A crash inside
-            # inner.transcribe() must still leave the spend recorded, so
-            # total_spend() can never under-count and the ceiling can never
-            # be breached on restart. This over-counts on failure, which
-            # fails safe.
-            self.store.record_spend(self.inner.name, cost)
+            # ONE atomic statement that both checks the ceiling and records
+            # the spend, and it runs BEFORE the paid call — see the module
+            # docstring for both rulings. Splitting this back into
+            # check_budget() + record_spend() reopens the C1 race.
+            self.store.reserve_spend(self.inner.name, cost)
 
         result = self.inner.transcribe(segment)
 

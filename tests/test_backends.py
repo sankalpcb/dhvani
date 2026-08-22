@@ -1,8 +1,11 @@
 import json
+import threading
+
 import numpy as np
 import pytest
 
 from dhvani.backends.base import Recorded, FixtureMissing
+from dhvani.config import MAX_SPEND_USD
 from dhvani.segmenter import Segment
 from dhvani.store import Store, BudgetExceeded
 
@@ -117,6 +120,91 @@ def test_record_mode_without_store_raises_value_error(tmp_path):
     live mode and must be rejected the same way."""
     with pytest.raises(ValueError):
         Recorded(FakeBackend(), "record", str(tmp_path), store=None)
+
+
+def test_live_mode_reserves_atomically_and_before_the_paid_call(tmp_path):
+    """C1 structural guard: Recorded must authorize a paid call with the
+    single atomic store.reserve_spend(), never with the check_budget() +
+    record_spend() pair, which are two separate autocommitted
+    transactions and therefore race across Store handles (see
+    tests/test_store.py::test_two_step_check_then_record_is_not_atomic).
+
+    Pinning the exact call sequence also re-pins the earlier ruling that
+    the reservation completes BEFORE inner.transcribe() runs, so a crash
+    inside the paid call can never leave spend unrecorded.
+    """
+    trace = []
+
+    class SpyStore:
+        def reserve_spend(self, tier, cost_usd):
+            trace.append(("reserve_spend", tier, cost_usd))
+
+        def check_budget(self, cost_usd):
+            trace.append(("check_budget", cost_usd))
+
+        def record_spend(self, tier, cost_usd):
+            trace.append(("record_spend", tier, cost_usd))
+
+    class TracingBackend(FakeBackend):
+        def transcribe(self, segment):
+            trace.append(("transcribe",))
+            return super().transcribe(segment)
+
+    Recorded(TracingBackend(), "live", str(tmp_path), SpyStore()).transcribe(_seg())
+
+    assert trace == [("reserve_spend", "fake", 0.5), ("transcribe",)], (
+        "live mode must reserve atomically, exactly once, before the paid call"
+    )
+
+
+def test_concurrent_live_wrappers_on_one_db_cannot_both_overspend(tmp_path):
+    """C1 end-to-end, through the shipped path: N Recorded wrappers, N
+    Store handles, one DB file. dhvani.cli's --db defaults to a fixed
+    shared path, so concurrent runs land here.
+
+    The ledger starts at 19.25 and each call costs 0.50, so exactly one
+    wrapper may proceed (19.75 fits; 20.25 does not). Refused wrappers
+    must raise BudgetExceeded WITHOUT calling the paid backend, and the
+    ledger must never end above the ceiling.
+    """
+    db = str(tmp_path / "shared.db")
+    n_threads = 8
+    with Store(db) as seed:
+        seed.record_spend("seed", MAX_SPEND_USD - 0.75)  # 19.25
+
+    barrier = threading.Barrier(n_threads)
+    lock = threading.Lock()
+    outcomes = []
+    paid_calls = []
+
+    def worker():
+        inner = FakeBackend()  # 0.5 per call
+        with Store(db) as store:
+            wrapper = Recorded(inner, "live", str(tmp_path), store)
+            barrier.wait()
+            try:
+                wrapper.transcribe(_seg())
+                result = "ok"
+            except BudgetExceeded:
+                result = "refused"
+        with lock:
+            outcomes.append(result)
+            paid_calls.append(inner.calls)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a worker thread deadlocked"
+
+    assert outcomes.count("ok") == 1, f"exactly one call may fit, got {outcomes}"
+    assert sum(paid_calls) == 1, "a refused wrapper must not call the paid backend"
+
+    with Store(db) as check:
+        total = check.total_spend()
+    assert total <= MAX_SPEND_USD, f"ledger breached the ceiling: {total}"
+    assert total == pytest.approx(MAX_SPEND_USD - 0.25)
 
 
 def test_replay_mode_without_store_still_constructs(tmp_path):

@@ -1,0 +1,28 @@
+[project]
+name = "dhvani"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "soundfile>=0.12",
+  "jiwer>=3.0",
+  "indic-transliteration>=2.3",
+]
+
+[project.scripts]
+dhvani = "dhvani.cli:main"
+dhvani-bench = "dhvani.report_cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+models = ["torch>=2.2", "transformers>=4.40"]
+cloud = ["google-cloud-speech>=2.26"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

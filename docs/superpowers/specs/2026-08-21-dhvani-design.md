@@ -51,6 +51,32 @@ WER simultaneously **over-penalizes benign script variance** and **under-penaliz
 corruption**. Prior art addresses this with `toWER`, `MER`, and `TER`. We adopt `toWER`; we
 do not claim to invent it.
 
+### 1.3.1 Measured reality — what toWER actually delivers (corrected 2026-08-22)
+
+An earlier draft of this section implied `toWER` separates the two rows above. **It does not,
+for the example shown.** Measured on the shipped implementation:
+
+| Case | plain WER | toWER |
+|---|---|---|
+| Native word across Indic scripts (`कम` vs `കമ`, both -> `kama`) | 1.00 | **0.00** |
+| English loanword in Indic script (`deployment` vs `ഡിപ്ലോയ്‌മെന്റ്`) | 0.25 | **0.25** |
+| Semantic corruption (`deployment` vs `डिब्बा`) | 0.25 | 0.25 |
+
+`toWER` collapses native words across writing systems perfectly. It gives **zero improvement**
+for an English loanword rendered in Indic script, because transliterate-then-WER can only help
+when both sides transliterate to the *same string* — and Indic phonetic spelling of an English
+word never matches its Latin original (`deployment` vs `diploymenr`). Normalization does not
+close the gap: NFKD + ZWNJ/ZWJ stripping + casefolding still leaves the two distinct.
+
+This is inherent to the published metric, not a defect in this implementation. It matters
+because the Chirp 3 defect in §1.2(2) is *specifically* about English words rendered in Indic
+script — so `toWER` does **not** neutralize the motivating failure mode. It is still the right
+regression target (it removes cross-script noise and never scores worse than plain WER), but
+the project must not claim it solves loanword rendering.
+
+Closing that gap needs phonetic distance or a loanword lexicon. Out of scope for Phase 1;
+pinned by `test_english_loanword_in_indic_script_is_not_neutralized`.
+
 ### 1.4 The product failure this project actually attacks
 
 YouTube auto-captions average ~60-70% accuracy in the wild. The system has internal

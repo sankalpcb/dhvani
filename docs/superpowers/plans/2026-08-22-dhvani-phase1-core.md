@@ -460,7 +460,9 @@ git commit -m "feat: SQLite store with schema-enforced idempotency and spend cei
 - Consumes: `dhvani.audio.normalize`, `dhvani.ids.segment_id`, `dhvani.config.SAMPLE_RATE`
 - Produces:
   - `dhvani.segmenter.Segment` — frozen dataclass with fields `segment_id: str`, `t_start_ms: int`, `t_end_ms: int`, `pcm: np.ndarray`
-  - `dhvani.segmenter.segment(pcm: np.ndarray, min_ms=2000, max_ms=8000) -> list[Segment]`
+  - `dhvani.segmenter.segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]`
+    (no `min_ms`: splitting is the segmenter's job, filtering is the scorer's — see Task 5's
+    `short_segment` feature, which would be dead if short segments were dropped here)
 
 Energy-based VAD is used rather than Silero to keep the test suite dependency-free and
 deterministic. Swapping in Silero later is a one-function change behind this interface.
@@ -581,11 +583,13 @@ def _runs(voiced: np.ndarray, gap_frames: int) -> list[tuple[int, int]]:
                 runs.append((start, i - silence + 1))
                 start = None
     if start is not None:
-        runs.append((start, len(voiced)))
+        # Exclude pending sub-threshold silence: leaking it into the slice would change
+        # segment_id for identical speech and silently defeat the dedup cache.
+        runs.append((start, len(voiced) - silence))
     return runs
 
 
-def segment(pcm: np.ndarray, min_ms: int = 2000, max_ms: int = 8000) -> list[Segment]:
+def segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]:
     """Split int16 PCM into caption-sized segments. Deterministic."""
     frame_len = SAMPLE_RATE * FRAME_MS // 1000
     voiced = _voiced_frames(pcm, frame_len)
@@ -720,7 +724,7 @@ _INDIC_SCRIPTS = (
     "TAMIL", "TELUGU", "BENGALI", "GUJARATI", "ORIYA", "GURMUKHI",
 )
 
-_VOWELS = set("aeiou")
+_VOWELS = set("aeiouy")  # y counts as a vowel: else "my"/"why"/"sky" score max suspicion
 
 
 def script_of(ch: str) -> str | None:
@@ -1014,7 +1018,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.router'`
 
 Pure function, no I/O. This is the intellectual core of the system: given a
 fixed spend per audio-hour, decide which segments deserve expensive treatment.
-Greedy by delta/cost is the standard approximation to fractional knapsack.
+This is 0/1 knapsack; ratio-greedy (delta/cost) is a heuristic with NO optimality
+guarantee. Chosen because segment costs are near-uniform here (duration-proportional).
+See test_greedy_is_knowingly_suboptimal_with_heterogeneous_costs for a counterexample.
 """
 
 from dataclasses import dataclass
@@ -1032,8 +1038,8 @@ class Candidate:
 
 
 def bucket_of(risk: float) -> str:
-    """Map a risk score to its decile bucket label."""
-    idx = min(int(risk * N_BUCKETS), N_BUCKETS - 1)
+    """Map a risk score to its decile bucket label. Clamps risk to [0, 1]."""
+    idx = min(int(max(0.0, min(risk, 1.0)) * N_BUCKETS), N_BUCKETS - 1)
     return f"{idx / N_BUCKETS:.1f}-{(idx + 1) / N_BUCKETS:.1f}"
 
 
@@ -1215,6 +1221,10 @@ class Recorded:
     def __init__(self, inner: Backend, mode: Mode, fixture_dir: str, store=None):
         if mode not in ("record", "replay", "live"):
             raise ValueError(f"unknown mode: {mode}")
+        if mode in ("live", "record") and store is None:
+            # Both modes invoke the paid backend; without a Store the spend
+            # ceiling is simply absent. Only replay may omit a store.
+            raise ValueError(f"mode={mode!r} makes paid calls and requires a Store")
         self.inner = inner
         self.mode = mode
         self.fixture_dir = fixture_dir
@@ -1243,11 +1253,12 @@ class Recorded:
         cost = self.inner.cost_per_call(segment)
         if self.store is not None:
             self.store.check_budget(cost)
+            # Record BEFORE the call: a crash after a paid call but before
+            # recording would under-count spend and breach the ceiling on
+            # restart. Pessimistic accounting fails safe.
+            self.store.record_spend(self.inner.name, cost)
 
         result = self.inner.transcribe(segment)
-
-        if self.store is not None:
-            self.store.record_spend(self.inner.name, cost)
 
         if self.mode == "record":
             path = self._path(segment)
@@ -1568,8 +1579,21 @@ class Tier0Conformer:
     name = "tier0"
 
     def __init__(self, model=None, lang: str = "hi", model_id: str = MODEL_ID):
-        self._model = model if model is not None else _load(model_id)
+        # MUST NOT call _load() here. Constructing this must import nothing and
+        # touch no network, so replay-mode callers work with zero ML deps (goal G5).
+        self._injected_model = model
+        self._loaded_model = None
         self.lang = lang
+        self.model_id = model_id
+
+    @property
+    def _model(self):
+        """Lazy: injected model wins; otherwise _load() runs once, on first use."""
+        if self._injected_model is not None:
+            return self._injected_model
+        if self._loaded_model is None:
+            self._loaded_model = _load(self.model_id)
+        return self._loaded_model
 
     def cost_per_call(self, segment) -> float:
         return 0.0  # local inference
@@ -1784,7 +1808,7 @@ def run(pcm: np.ndarray, source_id: str, tier0, store,
 
 ```python
 # dhvani/cli.py
-"""Entrypoint: dhvani transcribe <audio.wav>"""
+"""Entrypoint: dhvani <audio.wav> [--out track.json]"""
 
 import argparse
 import json
@@ -1987,8 +2011,11 @@ def build(rows: list[dict]) -> dict:
 """Cost/quality frontier: the headline artifact."""
 
 from dhvani.router import Candidate, delta_for, plan
+from dhvani.backends.tier1_chirp import cost_for_duration_ms
 
-TIER1_USD_PER_MIN = 0.003
+# NOTE (final review I1): this file must NOT define its own rate. Pricing lives
+# in tier1_chirp.cost_for_duration_ms so the frontier and the paid backend can
+# never drift. tests/test_report.py guards against reintroducing a local rate.
 
 
 def frontier(entries, delta_table: dict, budgets: list[float]) -> list[dict]:
@@ -2048,7 +2075,8 @@ def main(argv=None) -> int:
     table_path = argv[1] if len(argv) > 1 else "delta_table.json"
 
     if not os.path.exists(track_path):
-        print(f"missing {track_path}; run `dhvani transcribe` first", file=sys.stderr)
+        print(f"missing {track_path}; run `dhvani <audio.wav> --out {track_path}` first",
+              file=sys.stderr)
         return 1
 
     from dhvani.pipeline import TrackEntry
@@ -2245,6 +2273,12 @@ unsupported for Chirp 3, set USD_PER_MIN_DYNAMIC_BATCH = USD_PER_MIN_STANDARD.
 USD_PER_MIN_DYNAMIC_BATCH = 0.003
 USD_PER_MIN_STANDARD = 0.016
 
+# Google STT has historically billed in whole 15s increments, rounded up per
+# request. UNVERIFIED (spike 2 blocked). cost_per_call() rounds duration UP to
+# this before pricing: an overstated cost fails safe, an understated one lets
+# real spend breach the USD 20 ceiling while the ledger still reads under budget.
+BILLING_INCREMENT_SEC = 15
+
 
 class Tier1Chirp:
     name = "tier1"
@@ -2255,8 +2289,10 @@ class Tier1Chirp:
         self.recognizer = recognizer
 
     def cost_per_call(self, segment) -> float:
-        minutes = (segment.t_end_ms - segment.t_start_ms) / 60000.0
-        return USD_PER_MIN_DYNAMIC_BATCH * minutes
+        duration_ms = segment.t_end_ms - segment.t_start_ms
+        increment_ms = BILLING_INCREMENT_SEC * 1000
+        billable_ms = -(-duration_ms // increment_ms) * increment_ms  # ceil
+        return USD_PER_MIN_DYNAMIC_BATCH * billable_ms / 60000.0
 
     def transcribe(self, segment) -> dict:
         text = self._client.recognize_pcm(segment.pcm, self.lang)
@@ -2328,13 +2364,27 @@ i.e. whether DYNAMIC_BATCHING was accepted for chirp_3."
 ## Phase 1 Exit Criteria
 
 - [ ] `uv run pytest` passes with no network access and no cloud credentials
-- [ ] `dhvani transcribe sample.wav` produces a banded caption track
+- [ ] `dhvani sample.wav` produces a banded caption track
 - [ ] Re-running the same audio makes zero backend calls (cache hit)
-- [ ] `delta_table.json` is committed, built from a speaker-disjoint calibration split
 - [ ] `make bench` writes a cost/quality frontier to `results/report.md`
 - [ ] Total external spend recorded in the `spend` ledger is under USD 5
 - [ ] Both spike results are recorded in git history: CTC/RNNT head availability
       (Task 9) and Chirp dynamic-batch support (Task 12)
+
+**Deferred to Phase 2 — not met, and deliberately not faked:**
+
+- [ ] ~~A committed `fixtures/` corpus~~ — **deferred to Phase 2**: recording
+      fixtures needs real audio plus the gated HuggingFace IndicConformer weights,
+      and that spike is blocked (spec §14, Task 9). Manufacturing fixture contents
+      would make the replay suite green against invented transcripts.
+- [ ] ~~A committed `delta_table.json` built from a speaker-disjoint calibration
+      split~~ — **deferred to Phase 2**: requires both blocked spikes plus real
+      Chirp access to measure a genuine tier-over-tier delta. A fabricated table
+      would silently drive `router.plan()` and the headline frontier.
+
+`report.frontier()` already degrades correctly without the delta table: every
+delta is 0.0, nothing is eligible to escalate, and the chart is honestly empty
+rather than wrong.
 
 ## Deferred to Phase 2
 

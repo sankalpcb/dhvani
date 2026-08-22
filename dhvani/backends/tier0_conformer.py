@@ -39,8 +39,30 @@ class Tier0Conformer:
     name = "tier0"
 
     def __init__(self, model=None, lang: str = "hi", model_id: str = MODEL_ID):
-        self._model = model if model is not None else _load(model_id)
+        """Stores the injected model (or None) and the model_id. Does NOT
+        call _load() — constructing a Tier0Conformer must import nothing
+        and touch no network, so replay-mode callers (e.g. dhvani.cli) can
+        build one with zero ML dependencies installed. The real, gated
+        model is loaded lazily on first use via the `_model` property.
+        """
+        self._injected_model = model
+        self._loaded_model = None
         self.lang = lang
+        self.model_id = model_id
+
+    @property
+    def _model(self):
+        """The model to call, loading and caching it on first access.
+
+        An injected model (tests, or any caller that already has one) is
+        used as-is. Otherwise _load(self.model_id) runs exactly once, on
+        the first transcribe() call — never at construction time.
+        """
+        if self._injected_model is not None:
+            return self._injected_model
+        if self._loaded_model is None:
+            self._loaded_model = _load(self.model_id)
+        return self._loaded_model
 
     def cost_per_call(self, segment) -> float:
         return 0.0  # local inference

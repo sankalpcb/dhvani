@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dhvani.config import SAMPLE_RATE
+from dhvani.config import SAMPLE_RATE, TAU_FLAG, TAU_SHIP
 from dhvani.pipeline import band_of, run
 from dhvani.store import Store
 
@@ -32,6 +32,14 @@ def test_band_of_partitions_by_threshold():
     assert band_of(0.10) == "ship"
     assert band_of(0.45) == "marked"
     assert band_of(0.90) == "review"
+
+
+def test_band_of_pins_exact_boundaries():
+    """band_of uses strict '<' comparisons, so a risk exactly equal to a
+    threshold falls into the WORSE band, not the better one. Pin this
+    explicitly so it stays a deliberate choice, not an incidental one."""
+    assert band_of(TAU_SHIP) == "marked", "exactly tau_ship is not 'ship'"
+    assert band_of(TAU_FLAG) == "review", "exactly tau_flag is not 'marked'"
 
 
 def test_run_produces_one_entry_per_segment(store):

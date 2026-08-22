@@ -1808,7 +1808,7 @@ def run(pcm: np.ndarray, source_id: str, tier0, store,
 
 ```python
 # dhvani/cli.py
-"""Entrypoint: dhvani transcribe <audio.wav>"""
+"""Entrypoint: dhvani <audio.wav> [--out track.json]"""
 
 import argparse
 import json
@@ -2072,7 +2072,8 @@ def main(argv=None) -> int:
     table_path = argv[1] if len(argv) > 1 else "delta_table.json"
 
     if not os.path.exists(track_path):
-        print(f"missing {track_path}; run `dhvani transcribe` first", file=sys.stderr)
+        print(f"missing {track_path}; run `dhvani <audio.wav> --out {track_path}` first",
+              file=sys.stderr)
         return 1
 
     from dhvani.pipeline import TrackEntry
@@ -2360,13 +2361,27 @@ i.e. whether DYNAMIC_BATCHING was accepted for chirp_3."
 ## Phase 1 Exit Criteria
 
 - [ ] `uv run pytest` passes with no network access and no cloud credentials
-- [ ] `dhvani transcribe sample.wav` produces a banded caption track
+- [ ] `dhvani sample.wav` produces a banded caption track
 - [ ] Re-running the same audio makes zero backend calls (cache hit)
-- [ ] `delta_table.json` is committed, built from a speaker-disjoint calibration split
 - [ ] `make bench` writes a cost/quality frontier to `results/report.md`
 - [ ] Total external spend recorded in the `spend` ledger is under USD 5
 - [ ] Both spike results are recorded in git history: CTC/RNNT head availability
       (Task 9) and Chirp dynamic-batch support (Task 12)
+
+**Deferred to Phase 2 — not met, and deliberately not faked:**
+
+- [ ] ~~A committed `fixtures/` corpus~~ — **deferred to Phase 2**: recording
+      fixtures needs real audio plus the gated HuggingFace IndicConformer weights,
+      and that spike is blocked (spec §14, Task 9). Manufacturing fixture contents
+      would make the replay suite green against invented transcripts.
+- [ ] ~~A committed `delta_table.json` built from a speaker-disjoint calibration
+      split~~ — **deferred to Phase 2**: requires both blocked spikes plus real
+      Chirp access to measure a genuine tier-over-tier delta. A fabricated table
+      would silently drive `router.plan()` and the headline frontier.
+
+`report.frontier()` already degrades correctly without the delta table: every
+delta is 0.0, nothing is eligible to escalate, and the chart is honestly empty
+rather than wrong.
 
 ## Deferred to Phase 2
 

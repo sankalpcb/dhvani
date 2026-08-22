@@ -1,4 +1,17 @@
-"""Entrypoint: dhvani transcribe <audio.wav>"""
+"""Entrypoint: dhvani <audio.wav> [--out track.json]
+
+Usage note (fix round 2, I4): the audio path is a bare positional, NOT a
+`transcribe` subcommand. This module's docstring and report_cli's error
+message both used to name such a subcommand, which argparse rejects — it
+parses the verb as the audio path and then errors on the real one. The
+mismatch is resolved toward the bare positional because
+Phase 1 has exactly one verb; a subcommand layer with nothing to
+distinguish would be surface area for its own sake. Phase 2 can introduce
+subcommands when it adds a second verb.
+
+--out persists the track as JSON so `make bench` (dhvani.report_cli) has
+an input; the same payload still goes to stdout.
+"""
 
 import argparse
 import json
@@ -22,6 +35,11 @@ def main(argv=None) -> int:
     ap.add_argument("--mode", default=os.environ.get("DHVANI_MODE", "replay"))
     ap.add_argument("--fixtures", default="fixtures")
     ap.add_argument("--delta-table", default="delta_table.json")
+    ap.add_argument(
+        "--out",
+        help="also write the caption track here as JSON "
+             "(dhvani.report_cli reads this file; see `make bench`)",
+    )
     args = ap.parse_args(argv)
 
     samples, rate = sf.read(args.audio)
@@ -39,7 +57,16 @@ def main(argv=None) -> int:
         entries = run(pcm, os.path.basename(args.audio), tier0, store,
                       delta_table, args.budget)
 
-    print(json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2))
+    payload = json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2)
+
+    if args.out:
+        # Same bytes that go to stdout, so a track consumed from --out and
+        # one captured by redirecting stdout are interchangeable.
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+
+    print(payload)
     return 0
 
 

@@ -15,7 +15,11 @@ def main(argv=None) -> int:
     table_path = argv[1] if len(argv) > 1 else "delta_table.json"
 
     if not os.path.exists(track_path):
-        print(f"missing {track_path}; run `dhvani transcribe` first", file=sys.stderr)
+        # The audio path is a bare positional -- there is no `transcribe`
+        # subcommand (fix round 2, I4). This message used to name one,
+        # which argparse rejects.
+        print(f"missing {track_path}; run `dhvani <audio.wav> --out {track_path}` first",
+              file=sys.stderr)
         return 1
 
     from dhvani.pipeline import TrackEntry

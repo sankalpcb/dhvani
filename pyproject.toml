@@ -10,6 +10,10 @@ dependencies = [
   "indic-transliteration>=2.3",
 ]
 
+[project.scripts]
+dhvani = "dhvani.cli:main"
+dhvani-bench = "dhvani.report_cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 models = ["torch>=2.2", "transformers>=4.40"]

@@ -47,6 +47,31 @@ unknown, round toward the number that keeps the ceiling honest.
 """
 
 
+def cost_for_duration_ms(duration_ms: int) -> float:
+    """USD billed for one Tier 1 call on a segment of this duration.
+
+    THE single Tier 1 cost model. Anything that needs to price a Tier 1
+    call — the backend itself, and report.frontier(), which builds the
+    cost/quality chart people choose a budget from — must call this, not
+    re-derive a price from USD_PER_MIN_DYNAMIC_BATCH.
+
+    Fix round 2 (I1): report.py had its own copy of the rate and priced
+    candidates at exact wall-clock (rate * duration / 60000), while this
+    module rounded up to a whole billing increment. The frontier therefore
+    understated real spend by up to 7.5x on a 2000 ms segment ($0.000100
+    charted vs $0.000750 billed), so a run planned from the chart would
+    hit BudgetExceeded partway through. One function, one rate, one
+    rounding rule.
+
+    Rounding up to BILLING_INCREMENT_SEC is ceiling division in integer
+    arithmetic — see that constant's docstring for why rounding up is
+    required for the USD 20 ceiling to fail closed.
+    """
+    increment_ms = BILLING_INCREMENT_SEC * 1000
+    billable_ms = -(-int(duration_ms) // increment_ms) * increment_ms
+    return USD_PER_MIN_DYNAMIC_BATCH * (billable_ms / 60000.0)
+
+
 class Tier1Chirp:
     name = "tier1"
 
@@ -78,16 +103,7 @@ class Tier1Chirp:
         return self._built_client
 
     def cost_per_call(self, segment) -> float:
-        duration_ms = segment.t_end_ms - segment.t_start_ms
-        increment_ms = BILLING_INCREMENT_SEC * 1000
-        # Ceiling division in integer arithmetic: round the segment's
-        # duration up to the next whole billing increment before pricing
-        # it. See BILLING_INCREMENT_SEC's docstring for why rounding up
-        # (rather than exact duration) is required for the USD 20 ceiling
-        # to fail closed.
-        billable_ms = -(-duration_ms // increment_ms) * increment_ms
-        minutes = billable_ms / 60000.0
-        return USD_PER_MIN_DYNAMIC_BATCH * minutes
+        return cost_for_duration_ms(segment.t_end_ms - segment.t_start_ms)
 
     def transcribe(self, segment) -> dict:
         text = self._client.recognize_pcm(segment.pcm, self.lang)

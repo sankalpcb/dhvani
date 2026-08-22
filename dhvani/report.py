@@ -1,8 +1,14 @@
-"""Cost/quality frontier: the headline artifact."""
+"""Cost/quality frontier: the headline artifact.
 
+Pricing lives in dhvani.backends.tier1_chirp.cost_for_duration_ms and is
+imported, never reimplemented here. Fix round 2 (I1): this module used to
+carry its own copy of the rate and price candidates at exact wall-clock,
+while the backend rounded up to a whole billing increment — so the chart
+people choose a budget from understated real spend by up to 7.5x.
+"""
+
+from dhvani.backends.tier1_chirp import cost_for_duration_ms
 from dhvani.router import Candidate, delta_for, plan
-
-TIER1_USD_PER_MIN = 0.003
 
 
 def frontier(entries, delta_table: dict, budgets: list[float]) -> list[dict]:
@@ -41,7 +47,7 @@ def frontier(entries, delta_table: dict, budgets: list[float]) -> list[dict]:
             segment_id=e.segment_id,
             tier="tier1",
             risk=e.risk,
-            cost_usd=TIER1_USD_PER_MIN * (e.t_end_ms - e.t_start_ms) / 60000.0,
+            cost_usd=cost_for_duration_ms(e.t_end_ms - e.t_start_ms),
             delta=delta_for(e.risk, "tier1", delta_table),
         )
         for e in entries

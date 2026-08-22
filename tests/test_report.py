@@ -1,11 +1,75 @@
+import math
+
+import numpy as np
 import pytest
+
+import dhvani.report as report_mod
+from dhvani.backends.tier1_chirp import (
+    BILLING_INCREMENT_SEC, Tier1Chirp, cost_for_duration_ms,
+)
 from dhvani.pipeline import TrackEntry
-from dhvani.report import TIER1_USD_PER_MIN, frontier
+from dhvani.report import frontier
 from dhvani.router import Candidate, plan
+from dhvani.segmenter import Segment
 
 
 def _entry(sid, risk, duration_ms=3000):
     return TrackEntry(sid, 0, duration_ms, "text", risk, "marked")
+
+
+def _duration_costing_at_least(target_usd: float) -> int:
+    """Smallest whole number of billing increments priced >= target_usd.
+
+    Tier 1 is billed in whole BILLING_INCREMENT_SEC blocks, so an
+    arbitrary dollar figure is generally not an achievable segment price.
+    Tests that want "a segment costing about $10" must therefore pick a
+    duration and read its real price back out of the pricing function,
+    never divide a dollar figure by a rate.
+    """
+    increment_ms = BILLING_INCREMENT_SEC * 1000
+    per_increment = cost_for_duration_ms(increment_ms)
+    return increment_ms * math.ceil(target_usd / per_increment)
+
+
+# --- Fix round 2, I1: exactly one Tier 1 cost model in the codebase ---
+
+@pytest.mark.parametrize("duration_ms", [2000, 3000, 8000, 15000, 60000])
+def test_frontier_prices_a_segment_exactly_as_the_backend_bills_it(duration_ms):
+    """The frontier is the artifact used to choose a budget, so its prices
+    must be the prices that will actually be billed.
+
+    report.py used to reimplement Tier 1 pricing as exact wall-clock
+    (rate * duration / 60000), while Tier1Chirp.cost_per_call rounds up to
+    a whole BILLING_INCREMENT_SEC block -- understating real spend by up
+    to 7.5x on a 2000 ms segment ($0.000100 reported vs $0.000750
+    billed). A run planned from the chart would then hit BudgetExceeded
+    partway through.
+
+    Budgeting exactly the backend's own price for one segment must admit
+    exactly that segment and report exactly that spend.
+    """
+    backend_cost = Tier1Chirp(client=object()).cost_per_call(
+        Segment(segment_id="c" * 64, t_start_ms=0, t_end_ms=duration_ms,
+                pcm=np.zeros(4, dtype=np.int16))
+    )
+    rows = frontier(
+        [_entry("s0", 0.65, duration_ms)],
+        {"tier1": {"0.6-0.7": 18.0}},
+        budgets=[backend_cost],
+    )
+    assert rows[0]["escalated"] == 1, (
+        "the frontier priced this segment above what the backend bills, "
+        "so a budget equal to the real price did not admit it"
+    )
+    assert rows[0]["cost_usd"] == pytest.approx(backend_cost)
+
+
+def test_report_defines_no_tier1_rate_of_its_own():
+    """There must be exactly one rate definition in the codebase. A second
+    copy in report.py is what let the two cost models drift apart."""
+    assert not hasattr(report_mod, "TIER1_USD_PER_MIN"), (
+        "report.py must import Tier 1 pricing, not redefine the rate"
+    )
 
 
 def test_frontier_total_delta_is_monotonic_in_budget():
@@ -23,14 +87,17 @@ def test_frontier_total_delta_is_monotonic_in_budget():
     total_delta -- the actual value metric -- must never decrease across
     an ascending budget sweep.
 
-    Uses the reviewer's exact counterexample: one segment with cost=10,
-    delta=100 (ratio 10) vs. five segments each with cost=1, delta=5
-    (ratio 5).
+    Uses the reviewer's exact counterexample: one segment with cost~=10,
+    delta=100 (ratio ~10) vs. five segments each with cost~=1, delta=5
+    (ratio ~5). The costs are read back out of the real pricing function
+    rather than assumed, because Tier 1 bills in whole 15s blocks and
+    exact round-dollar segment prices do not exist (fix round 2, I1).
     """
-    big_cost = 10.0
-    small_cost = 1.0
-    big_duration_ms = round(big_cost / TIER1_USD_PER_MIN * 60000)
-    small_duration_ms = round(small_cost / TIER1_USD_PER_MIN * 60000)
+    big_duration_ms = _duration_costing_at_least(10.0)
+    small_duration_ms = _duration_costing_at_least(1.0)
+    big_cost = cost_for_duration_ms(big_duration_ms)
+    small_cost = cost_for_duration_ms(small_duration_ms)
+    assert big_cost / 100.0 < small_cost / 5.0, "big must have the better ratio"
 
     entries = [
         _entry("big", 0.95, big_duration_ms),

@@ -1579,8 +1579,21 @@ class Tier0Conformer:
     name = "tier0"
 
     def __init__(self, model=None, lang: str = "hi", model_id: str = MODEL_ID):
-        self._model = model if model is not None else _load(model_id)
+        # MUST NOT call _load() here. Constructing this must import nothing and
+        # touch no network, so replay-mode callers work with zero ML deps (goal G5).
+        self._injected_model = model
+        self._loaded_model = None
         self.lang = lang
+        self.model_id = model_id
+
+    @property
+    def _model(self):
+        """Lazy: injected model wins; otherwise _load() runs once, on first use."""
+        if self._injected_model is not None:
+            return self._injected_model
+        if self._loaded_model is None:
+            self._loaded_model = _load(self.model_id)
+        return self._loaded_model
 
     def cost_per_call(self, segment) -> float:
         return 0.0  # local inference

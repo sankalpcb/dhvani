@@ -839,9 +839,11 @@ def escalate(entries, segments, backend, store, delta_table, budget_usd):
     if not chosen:
         return None
 
-    # Reserve the whole batch atomically-per-call before anything is sent.
-    for cand in chosen:
-        store.reserve_spend(backend.name, cand.cost_usd)
+    # ONE reservation for the whole batch, not one per candidate. A loop can
+    # partially succeed then raise, leaving spend reserved for a batch that was
+    # never submitted -- money that buys nothing and cannot be recovered.
+    total_cost = sum(cand.cost_usd for cand in chosen)
+    store.reserve_spend(backend.name, total_cost)
 
     batch = [segments[c.segment_id] for c in chosen]
 

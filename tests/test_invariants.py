@@ -119,28 +119,20 @@ def test_i2_reconciling_a_settled_job_repeatedly_is_a_no_op(store):
 def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
     """The headline property: once everything settles, async == sync.
 
-    KNOWN FAILING -- see task-7-report.md for the full writeup. Root cause
-    is in ChaosBackend.poll() (dhvani/backends/chaos.py), not in this test
-    or in reconcile()/escalate()/track.py: the "partial" fault truncates a
-    job's results to `sorted(items)[:len(items)//2]` on every single poll
-    of that job, with no dependence on attempt count or any other evolving
-    state, so a job it ever truncates is truncated identically forever.
-    Combined with "duplicate"/"reorder" (which only reorder/repeat the
-    already-truncated items, dict-collapsed on return, so they cannot
-    reintroduce what "partial" dropped), the excluded half of the batch
-    is never delivered by ANY number of reconcile() passes against this
-    same job -- the job is left "running" forever, exactly as designed
-    (reconcile.py only marks a job "done" once its results cover every
-    segment_id it registered, spec I1). That correctly protects I1 (no
-    entry is ever lost), but it means passive draining alone can never
-    reach I6 for a job "partial" has touched, contradicting chaos.py's
-    own module docstring ("the invariant suite asserts the system still
-    loses nothing and converges"). test_i6_convergence_is_reachable_from_
-    a_partial_start shows the actual recovery path: a caller must
-    periodically re-run escalate() for still-outstanding segments, not
-    just keep polling the same stuck job. This test intentionally keeps
-    the original assertion (no resubmission) to pin the gap rather than
-    hide it -- do not weaken it to make the suite green.
+    History (Task 7, fix round 1): this test originally failed. ChaosBackend's
+    "partial" fault used to truncate a job's results to the same first-half
+    subset on EVERY poll of that job, forever, with nothing dependent on
+    attempt count -- that models a permanently broken job, not a transient
+    partial delivery, so the excluded half was never deliverable by any
+    number of reconcile() passes and the job stayed "running" forever. See
+    dhvani/backends/chaos.py's module docstring ("Fix round 1") for the
+    resolution: "partial" now truncates only the FIRST time a job would
+    deliver results and returns the full set on every poll after that, so
+    a job it touches still converges under sustained polling. This test
+    exercises exactly that combination (partial + reorder + duplicate,
+    with pending_polls startup latency) and asserts real convergence with
+    no resubmission needed -- see task-7-report.md's "Fix round 1" section
+    for the full trace of the original failure and the fix.
     """
     backend = ChaosBackend(SyncAsyncAdapter(StubSync(), pending_polls=2),
                            faults=("partial", "reorder", "duplicate"), seed=3)
@@ -166,3 +158,79 @@ def test_i6_convergence_is_reachable_from_a_partial_start(store):
     escalate(ENTRIES, SEGMENTS, clean, store, TABLE, 10.0)
     entries = _track(store, _drain(clean, store))
     assert all(e.text.startswith("fixed-") for e in entries)
+
+
+class PermanentlyPartialBackend:
+    """An AsyncBackend whose poll() always returns only some of a job's
+    registered segments -- on every single call, forever. Built directly
+    against the AsyncBackend protocol (submit/poll/cost_per_call), NOT via
+    ChaosBackend, so this test does not depend on ChaosBackend's "partial"
+    fault at all.
+
+    This pins the genuinely permanent failure mode that ChaosBackend's
+    "partial" fault used to model by accident before Task 7 fix round 1
+    (see dhvani/backends/chaos.py's module docstring): a batch job that
+    never, ever finishes delivering. Real systems can get stuck exactly
+    like this -- a worker that crashed mid-batch, a queue partition that
+    lost the rest of the payload. No amount of reconcile() polling can
+    make such a job settle; what must still hold is I1: nothing already
+    in the track is ever lost or duplicated, the job is never falsely
+    marked done, and the segments that never arrive keep exactly the text
+    they had before escalation was ever attempted, rather than being
+    blanked or corrupted.
+    """
+
+    name = "tier1"
+    variant_key = "tier1|hi-IN"
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        full = self.inner.poll(job_id)
+        if full is None:
+            return None
+        items = sorted(full.items())
+        keep = max(1, len(items) // 2)
+        return dict(items[:keep])
+
+
+def test_i1_holds_under_a_permanently_partial_backend(store):
+    """The permanent-failure counterpart to test_i6_convergence_is_reachable_
+    from_a_partial_start: when a job's delivery is not merely delayed but
+    genuinely never completes, the system must still lose nothing (I1),
+    must never claim a job settled that did not (reconcile.py's
+    done-only-when-complete rule), and must leave the segments it could
+    not escalate exactly as they were, not blanked.
+    """
+    backend = PermanentlyPartialBackend(SyncAsyncAdapter(StubSync()))
+    job_id = escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    version = _drain(backend, store, max_passes=20)
+    entries = _track(store, version)
+
+    # I1: every segment appears exactly once, nothing lost or duplicated.
+    ids = [e.segment_id for e in entries]
+    assert len(ids) == N
+    assert len(set(ids)) == N
+    assert sorted(ids) == sorted(SEGMENTS)
+
+    # The job can never cover all its registered segment_ids, so it must
+    # never be falsely marked done -- it stays "running" and still shows
+    # up in open_jobs() for a future retry (or resubmission) to find.
+    job = store.get_job(job_id)
+    assert job["state"] == "running"
+    assert job_id in {j["job_id"] for j in store.open_jobs()}
+
+    # The segments that were never delivered keep their original Tier 0
+    # text/risk/band untouched -- degrade safely, don't blank or corrupt.
+    delivered = [e for e in entries if e.text != "raw"]
+    undelivered = [e for e in entries if e.text == "raw"]
+    assert delivered and undelivered
+    assert all(e.risk == 0.65 and e.band == "review" for e in undelivered)
+    assert all(e.text.startswith("fixed-") for e in delivered)

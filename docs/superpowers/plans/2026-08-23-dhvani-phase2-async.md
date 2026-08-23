@@ -1231,6 +1231,7 @@ class ChaosBackend:
         self.variant_key = inner.variant_key
         self.faults = tuple(faults)
         self.seed = seed
+        self._partial_delivered: set[str] = set()  # jobs already truncated once
 
     def cost_per_call(self, segment) -> float:
         return self.inner.cost_per_call(segment)
@@ -1253,9 +1254,15 @@ class ChaosBackend:
         rng = random.Random(f"{self.seed}:{job_id}")
         items = sorted(results.items())
 
-        if "partial" in self.faults and len(items) > 1:
+        # Truncate only the FIRST time this job would deliver results.
+        # "partial" models a batch that comes back incomplete once and
+        # completes on retry — not a permanently broken job. Without the
+        # heal, convergence (I6) is unreachable under this fault.
+        if ("partial" in self.faults and len(items) > 1
+                and job_id not in self._partial_delivered):
             keep = max(1, len(items) // 2)
             items = items[:keep]
+            self._partial_delivered.add(job_id)
 
         if "reorder" in self.faults:
             rng.shuffle(items)

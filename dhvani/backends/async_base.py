@@ -37,8 +37,10 @@ class AsyncBackend(Protocol):
 def job_id_for(variant_key: str, segments) -> str:
     """Content-derived job id: same variant plus same segments -> same id."""
     digest = hashlib.sha256(variant_key.encode("utf-8"))
+    digest.update(b"\x00")  # Delimiter to prevent variant_key/segment_id boundary ambiguity
     for segment_id in sorted(s.segment_id for s in segments):
         digest.update(segment_id.encode("utf-8"))
+        digest.update(b"\x00")  # Delimiter between segment ids
     return digest.hexdigest()[:32]
 
 
@@ -52,6 +54,7 @@ class SyncAsyncAdapter:
         self.pending_polls = pending_polls
         self._jobs: dict[str, list] = {}
         self._polls: dict[str, int] = {}
+        self._results: dict[str, dict] = {}  # Cache for completed job results
 
     def cost_per_call(self, segment) -> float:
         return self.inner.cost_per_call(segment)
@@ -68,4 +71,7 @@ class SyncAsyncAdapter:
         if self._polls[job_id] < self.pending_polls:
             self._polls[job_id] += 1
             return None
-        return {s.segment_id: self.inner.transcribe(s) for s in self._jobs[job_id]}
+        # Return cached results if already computed; compute and cache otherwise
+        if job_id not in self._results:
+            self._results[job_id] = {s.segment_id: self.inner.transcribe(s) for s in self._jobs[job_id]}
+        return self._results[job_id]

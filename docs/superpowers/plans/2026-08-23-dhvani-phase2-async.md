@@ -1051,13 +1051,21 @@ def reconcile(source_id: str, backend, store) -> int:
 
         settled.append(job["job_id"])
 
-    if not updates:
-        return version
-
-    merged = merge_entries(entries, updates)
-    new_version = version + 1
-    store.put_track(source_id, new_version, POLICY_ID,
-                    entries_to_json(merged), current["cost_usd"])
+    if updates:
+        merged = merge_entries(entries, updates)
+        new_version = version + 1
+        wrote = store.put_track(source_id, new_version, POLICY_ID,
+                                entries_to_json(merged), current["cost_usd"])
+        if not wrote:
+            # INSERT OR IGNORE: another writer landed this version first, so
+            # our merge was NEVER written. Marking jobs done here would make
+            # the result permanently unrecoverable (I1 violation). Fail safe:
+            # leave them running for the next pass, report the real version.
+            for job_id in settled:
+                store.set_job_state(job_id, "running")
+            return store.latest_track_version(source_id)
+    else:
+        new_version = version
 
     for job_id in settled:
         store.set_job_state(job_id, "done")

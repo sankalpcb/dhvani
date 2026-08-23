@@ -146,3 +146,83 @@ def test_partial_delivery_leaves_job_running_not_done(store):
     job = store.get_job(job_id)
     assert job["state"] == "running"
     assert job_id in [j["job_id"] for j in store.open_jobs()]
+
+
+class StaleVersionStore:
+    """Wraps a real Store so its FIRST latest_track_version() call returns
+    a stale value, as if that read had happened before a concurrent writer
+    committed a newer version -- everything else (get_track, put_track,
+    job methods, and any later latest_track_version() call) goes straight
+    to the real store, which already reflects the concurrent write.
+
+    This is what lets a single-threaded test reproduce the race: by the
+    time reconcile()'s own put_track() runs, the version it computed from
+    the stale read collides with what the "other writer" already landed.
+    """
+
+    def __init__(self, inner, stale_version: int):
+        self._inner = inner
+        self._stale_version = stale_version
+        self._served_stale = False
+
+    def latest_track_version(self, source_id: str) -> int:
+        if not self._served_stale:
+            self._served_stale = True
+            return self._stale_version
+        return self._inner.latest_track_version(source_id)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_lost_race_on_put_track_does_not_settle_job_or_lose_result(store):
+    """put_track() is INSERT OR IGNORE: on a (source_id, version) collision
+    it returns False and writes nothing. If reconcile() ignored that and
+    marked the job done anyway, the merged result would exist nowhere
+    durable and the job would never be retried -- a silent I1 violation.
+
+    Reproduces the race directly: seed v1, escalate a job, then have a
+    second writer land v2 (with content that is NOT the merge) -- and make
+    reconcile()'s own latest_track_version() read return the stale v1, as
+    if that read happened before the other writer's commit, so its own
+    put_track(vid1, 2, ...) collides with what the other writer already
+    landed. reconcile() must not claim a version it did not write, must
+    leave the job open for retry, and a later pass -- now racing against
+    nothing -- must succeed.
+    """
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    job_id = escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+
+    # A concurrent writer lands version 2 first, with content that is not
+    # the escalated merge (here, an untouched copy of v1's raw entries).
+    store.put_track("vid1", 2, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+
+    # reconcile() reads a stale latest_track_version() (1) -- as if its
+    # read raced ahead of the other writer's commit -- so it computes
+    # new_version = 2 and collides with what's already there.
+    stale_store = StaleVersionStore(store, stale_version=1)
+
+    lost_race_version = reconcile("vid1", backend, stale_store)
+
+    # reconcile() must report the version actually in the store (read via
+    # its second, non-stale latest_track_version() call), not the version
+    # it attempted -- and failed -- to write.
+    assert lost_race_version == 2
+    stored = entries_from_json(store.get_track("vid1", lost_race_version)["content_json"])
+    assert [e.text for e in stored] == ["raw", "raw"]
+
+    # The job's result was not persisted anywhere -- it must remain open
+    # for retry, not settled as done.
+    job = store.get_job(job_id)
+    assert job["state"] == "running"
+    assert job_id in [j["job_id"] for j in store.open_jobs()]
+
+    # A later pass, now racing against nothing (real store, no stale
+    # read), must succeed and actually merge the escalated text in -- this
+    # is what proves recovery works rather than just failing quietly.
+    recovered_version = reconcile("vid1", backend, store)
+    assert recovered_version == 3
+    merged = entries_from_json(store.get_track("vid1", recovered_version)["content_json"])
+    assert merged[0].text == "escalated"
+    assert store.get_job(job_id)["state"] == "done"

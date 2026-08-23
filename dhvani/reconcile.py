@@ -15,6 +15,14 @@ later reconcile() pass polls it again and the still-missing segments get
 another chance to arrive. Settling the job on any non-empty result would
 strand those segments forever -- the track could then never converge to
 the state a synchronous run would produce (invariant I1).
+
+put_track() is INSERT OR IGNORE: on a (source_id, version) collision -- a
+second writer landed that version first -- it returns False and writes
+nothing. A job is marked done only after that write is confirmed to have
+landed. Losing the race and marking the job done anyway would make its
+result unrecoverable (it exists nowhere durable, and open_jobs() would
+never surface the job again to retry it), which is exactly the I1
+violation this module exists to prevent.
 """
 
 from dhvani.config import POLICY_ID
@@ -67,13 +75,29 @@ def reconcile(source_id: str, backend, store) -> int:
             # still returns it and a later pass retries the missing ones.
             store.set_job_state(job["job_id"], "running")
 
-    if not updates:
-        return version
-
-    merged = merge_entries(entries, updates)
-    new_version = version + 1
-    store.put_track(source_id, new_version, POLICY_ID,
-                    entries_to_json(merged), current["cost_usd"])
+    if updates:
+        merged = merge_entries(entries, updates)
+        new_version = version + 1
+        wrote = store.put_track(source_id, new_version, POLICY_ID,
+                                entries_to_json(merged), current["cost_usd"])
+        if not wrote:
+            # Lost the race: another writer already committed source_id's
+            # next version between our read of latest_track_version() and
+            # this put_track() call. INSERT OR IGNORE means our merge was
+            # never written -- it exists only in local variables now, not
+            # in the store. Claiming new_version, or marking any settled
+            # job done, would make that merge permanently unrecoverable.
+            #
+            # Fail safe: report the version actually in the store, and
+            # leave every job we would have settled as running so the next
+            # reconcile() pass re-polls (results are memoized on the
+            # backend -- no extra spend) and re-merges against whatever the
+            # other writer landed.
+            for job_id in settled:
+                store.set_job_state(job_id, "running")
+            return store.latest_track_version(source_id)
+    else:
+        new_version = version
 
     for job_id in settled:
         store.set_job_state(job_id, "done")

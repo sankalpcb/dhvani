@@ -32,6 +32,10 @@ def escalate(entries, segments, backend, store, delta_table, budget_usd):
             delta=delta_for(e.risk, "tier1", delta_table),
         )
         for e in entries
+        # Intentional silent exclusion: an entry with no matching Segment
+        # has no real pcm, and Tier1Chirp.transcribe() requires it -- such
+        # an entry cannot be escalated at all, so it is dropped here,
+        # before the router ever sees it, rather than raised.
         if e.segment_id in segments
     ]
 
@@ -39,9 +43,16 @@ def escalate(entries, segments, backend, store, delta_table, budget_usd):
     if not chosen:
         return None
 
-    # Reserve the whole batch atomically-per-call before anything is sent.
-    for cand in chosen:
-        store.reserve_spend(backend.name, cand.cost_usd)
+    # Reserve the batch's summed cost in ONE atomic call before submitting,
+    # not once per candidate. A per-candidate loop can partially succeed
+    # and then raise on a later candidate, leaving spend reserved for a
+    # batch that was never submitted anywhere -- that money buys nothing
+    # and cannot be recovered (unlike the deliberate double-reservation on
+    # resubmit, where the spend maps to a real, submitted job). A single
+    # reserve_spend() call makes the failure atomic: if it raises, nothing
+    # was reserved and nothing was submitted.
+    total_cost = sum(cand.cost_usd for cand in chosen)
+    store.reserve_spend(backend.name, total_cost)
 
     batch = [segments[c.segment_id] for c in chosen]
 

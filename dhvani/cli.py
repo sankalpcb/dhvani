@@ -22,7 +22,9 @@ import soundfile as sf
 from dhvani.audio import normalize
 from dhvani.backends.base import Recorded
 from dhvani.backends.tier0_conformer import Tier0Conformer
+from dhvani.config import POLICY_ID
 from dhvani.pipeline import run
+from dhvani.segmenter import segment as split
 from dhvani.store import Store
 
 
@@ -40,6 +42,14 @@ def main(argv=None) -> int:
         help="also write the caption track here as JSON "
              "(dhvani.report_cli reads this file; see `make bench`)",
     )
+    ap.add_argument(
+        "--escalate", action="store_true",
+        help="after transcribing, plan and submit a Tier 1 escalation batch",
+    )
+    ap.add_argument(
+        "--reconcile", action="store_true",
+        help="poll outstanding escalation jobs and merge any completed results",
+    )
     args = ap.parse_args(argv)
 
     samples, rate = sf.read(args.audio)
@@ -56,6 +66,28 @@ def main(argv=None) -> int:
         )
         entries = run(pcm, os.path.basename(args.audio), tier0, store,
                       delta_table, args.budget)
+
+        if args.escalate or args.reconcile:
+            from dhvani.backends.async_base import SyncAsyncAdapter
+            from dhvani.backends.tier1_chirp import Tier1Chirp
+            from dhvani.escalate import escalate as do_escalate
+            from dhvani.reconcile import reconcile as do_reconcile
+            from dhvani.track import entries_to_json
+
+            source = os.path.basename(args.audio)
+            # Real Segments, not stubs: Tier1Chirp.transcribe() reads .pcm.
+            segments = {s.segment_id: s for s in split(pcm)}
+            tier1 = SyncAsyncAdapter(Tier1Chirp(lang=f"{args.lang}-IN"))
+
+            if store.latest_track_version(source) == 0:
+                store.put_track(source, 1, POLICY_ID,
+                                entries_to_json(entries), 0.0)
+
+            if args.escalate:
+                do_escalate(entries, segments, tier1, store,
+                            delta_table, args.budget)
+            if args.reconcile:
+                do_reconcile(source, tier1, store)
 
     payload = json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2)
 

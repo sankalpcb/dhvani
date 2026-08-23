@@ -1533,11 +1533,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.metrics'`
 """Timing and throughput instrumentation (spec §9.1).
 
 Deliberately dependency-free and deterministic in shape: percentile() uses
-linear interpolation over a sorted copy, so the same samples always give the
-same summary. Timing values themselves vary run to run, which is why no test
+the nearest-rank method over a sorted copy, so the same samples always give
+the same summary. Timing values themselves vary run to run, which is why no test
 asserts a specific duration.
 """
 
+import math
 import time
 
 
@@ -1558,19 +1559,20 @@ class Timer:
 
 
 def percentile(values, p: float) -> float:
-    """Linear-interpolated percentile. p is a fraction in [0, 1]."""
+    """Nearest-rank percentile: rank = ceil(p * n). p is a fraction in [0, 1].
+
+    Nearest-rank, NOT linear interpolation. A latency percentile should report
+    an actual observed sample, not a synthetic value between two measurements.
+    An earlier draft of this plan specified interpolation while its own tests
+    pinned nearest-rank — the tests were right.
+    """
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"p must be between 0 and 1, got {p}")
     if not values:
         return 0.0
     ordered = sorted(values)
-    if len(ordered) == 1:
-        return float(ordered[0])
-    position = p * (len(ordered) - 1)
-    low = int(position)
-    high = min(low + 1, len(ordered) - 1)
-    weight = position - low
-    return float(ordered[low] * (1.0 - weight) + ordered[high] * weight)
+    rank = max(1, math.ceil(p * len(ordered)))
+    return float(ordered[rank - 1])
 
 
 def summarize(samples: dict) -> dict:

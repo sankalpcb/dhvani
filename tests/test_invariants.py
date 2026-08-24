@@ -15,9 +15,10 @@ from dhvani.config import POLICY_ID
 from dhvani.escalate import escalate
 from dhvani.pipeline import TrackEntry
 from dhvani.reconcile import reconcile
+from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import Segment
 from dhvani.store import Store
-from dhvani.track import entries_from_json, entries_to_json
+from dhvani.track import entries_from_json, entries_to_json, merge_entries
 
 
 class StubSync:
@@ -49,7 +50,17 @@ def store(tmp_path):
 
 def _drain(backend, store, max_passes=20):
     """Reconcile until this backend has no open jobs left, surviving
-    injected transients.
+    injected transients. Returns (version, converged).
+
+    `converged` is True only if the loop actually reached a state where this
+    backend has no open jobs left -- i.e. the drain finished because the
+    system settled, not because max_passes ran out. Reporting it is what
+    stops "never converged" from being indistinguishable from "converged":
+    the helper used to return quietly in both cases, so every caller that
+    believed it was asserting convergence was really asserting nothing about
+    it at all. Callers that expect convergence must now assert it, and the
+    ones that legitimately never converge (the transient-fault backends,
+    PermanentlyPartialBackend) must assert `not converged` explicitly.
 
     NOT "stop at the first pass that makes no progress": an async backend
     with startup latency (SyncAsyncAdapter's pending_polls) legitimately
@@ -66,6 +77,7 @@ def _drain(backend, store, max_passes=20):
     it is safe to keep calling reconcile() up to max_passes regardless.
     """
     version = store.latest_track_version("vid1")
+    converged = False
     for _ in range(max_passes):
         try:
             version = reconcile("vid1", backend, store)
@@ -75,8 +87,9 @@ def _drain(backend, store, max_passes=20):
             job["tier"] == backend.name and job["variant_key"] == backend.variant_key
             for job in store.open_jobs()
         ):
+            converged = True
             break
-    return version
+    return version, converged
 
 
 def _track(store, version):
@@ -90,11 +103,21 @@ def _track(store, version):
 def test_i1_no_segment_is_ever_lost_or_duplicated(store, faults):
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=faults, seed=11)
     escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
-    entries = _track(store, _drain(backend, store))
+    version, converged = _drain(backend, store)
+    assert converged
+    entries = _track(store, version)
     ids = [e.segment_id for e in entries]
     assert len(ids) == N
     assert len(set(ids)) == N
     assert sorted(ids) == sorted(SEGMENTS)
+    # Identity alone is not I1. A reconciler that polls and then throws every
+    # result away keeps all N ids present and distinct -- the Tier 0 entries
+    # are simply still sitting there -- so the checks above pass while nothing
+    # was ever merged. Every one of these faults is survivable, so once the
+    # drain converges each segment must actually carry its escalated text.
+    assert [e.text for e in entries] == [
+        f"fixed-{e.segment_id[:4]}" for e in entries
+    ]
 
 
 @pytest.mark.parametrize("faults", [("timeout",), ("rate_limit",), ("server_error",)])
@@ -102,21 +125,26 @@ def test_i1_holds_when_every_poll_fails(store, faults):
     """A backend that never succeeds must leave the track intact, not corrupt."""
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=faults, seed=5)
     escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
-    entries = _track(store, _drain(backend, store))
+    version, converged = _drain(backend, store)
+    # These faults raise on EVERY poll, so the job can never settle. Say so
+    # out loud: silence from _drain() used to be the only evidence either way.
+    assert not converged
+    entries = _track(store, version)
     assert [e.text for e in entries] == ["raw"] * N
 
 
 def test_i2_reconciling_a_settled_job_repeatedly_is_a_no_op(store):
     backend = SyncAsyncAdapter(StubSync())
     escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
-    version = _drain(backend, store)
+    version, converged = _drain(backend, store)
+    assert converged
     before = store.get_track("vid1", version)["content_json"]
     for _ in range(5):
         assert reconcile("vid1", backend, store) == version
     assert store.get_track("vid1", version)["content_json"] == before
 
 
-def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
+def test_i6_async_converges_to_the_synchronous_result(store):
     """The headline property: once everything settles, async == sync.
 
     History (Task 7, fix round 1): this test originally failed. ChaosBackend's
@@ -133,17 +161,43 @@ def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
     with pending_polls startup latency) and asserts real convergence with
     no resubmission needed -- see task-7-report.md's "Fix round 1" section
     for the full trace of the original failure and the fix.
+
+    The expected side is built HERE, by hand, and never passes through
+    reconcile(). It used to be produced by a second escalate() + _drain()
+    with chaos switched off, which made the test circular: both sides of
+    `async_entries == sync_entries` flowed through the same reconcile() and
+    merge_entries(), so any bug in that shared path cancelled out on both
+    sides and the equality still held. A reconciler that discarded every
+    polled result left both tracks at their untouched Tier 0 state and this
+    test passed. The ground truth below calls StubSync.transcribe() directly
+    and applies merge_entries() exactly once, mirroring reconcile()'s risk
+    computation (scorer.extract() over the returned text and the segment's
+    duration, then scorer.risk()) so the comparison is like-for-like.
     """
     backend = ChaosBackend(SyncAsyncAdapter(StubSync(), pending_polls=2),
                            faults=("partial", "reorder", "duplicate"), seed=3)
     escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
-    async_entries = _track(store, _drain(backend, store, max_passes=60))
+    version, converged = _drain(backend, store, max_passes=60)
+    assert converged
+    async_entries = _track(store, version)
 
-    with Store(str(tmp_path / "sync.db")) as sync_store:
-        sync_store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
-        plain = SyncAsyncAdapter(StubSync())
-        escalate("vid1", ENTRIES, SEGMENTS, plain, sync_store, TABLE, 10.0)
-        sync_entries = _track(sync_store, _drain(plain, sync_store))
+    stub = StubSync()
+    updates = {}
+    for entry in ENTRIES:
+        result = stub.transcribe(SEGMENTS[entry.segment_id])
+        duration = entry.t_end_ms - entry.t_start_ms
+        features = extract(result["text"], result.get("signals", {}), duration)
+        updates[entry.segment_id] = {
+            "text": result["text"],
+            "risk": compute_risk(features),
+        }
+    sync_entries = merge_entries(ENTRIES, updates)
+
+    # Guard against the whole comparison silently degenerating into
+    # "unescalated == unescalated": the expected track must really differ
+    # from the Tier 0 input it was built from.
+    assert all(e.text.startswith("fixed-") for e in sync_entries)
+    assert sync_entries != ENTRIES
 
     assert async_entries == sync_entries
 
@@ -156,7 +210,9 @@ def test_i6_convergence_is_reachable_from_a_partial_start(store):
 
     clean = SyncAsyncAdapter(StubSync())
     escalate("vid1", ENTRIES, SEGMENTS, clean, store, TABLE, 10.0)
-    entries = _track(store, _drain(clean, store))
+    version, converged = _drain(clean, store)
+    assert converged
+    entries = _track(store, version)
     assert all(e.text.startswith("fixed-") for e in entries)
 
 
@@ -211,7 +267,10 @@ def test_i1_holds_under_a_permanently_partial_backend(store):
     """
     backend = PermanentlyPartialBackend(SyncAsyncAdapter(StubSync()))
     job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
-    version = _drain(backend, store, max_passes=20)
+    version, converged = _drain(backend, store, max_passes=20)
+    # This backend can never deliver a job's full set, so the drain must run
+    # out of passes rather than settle -- assert that rather than infer it.
+    assert not converged
     entries = _track(store, version)
 
     # I1: every segment appears exactly once, nothing lost or duplicated.

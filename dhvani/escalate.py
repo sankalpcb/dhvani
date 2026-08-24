@@ -7,14 +7,18 @@ Spend is reserved for the entire batch BEFORE submit() is called, matching
 the Phase 1 rule that money is accounted before the paid call, never after —
 a crash between submission and accounting would otherwise under-count and
 let the USD 20 ceiling be breached on restart.
+
+FIX ROUND 3 (C2): candidates are priced with backend.cost_per_call(), not
+with cost_for_duration_ms() called directly. Pricing unconditionally at the
+live rate made a replay run reserve real dollars against the USD 20 ceiling
+for calls that never happen. cost_per_call is already on the AsyncBackend
+protocol, SyncAsyncAdapter delegates it, and Recorded.cost_per_call returns
+0.0 in replay -- while Tier1Chirp.cost_per_call still routes through
+cost_for_duration_ms(), so live pricing is unchanged and there is still
+exactly one cost model.
 """
 
-from dhvani.backends.tier1_chirp import cost_for_duration_ms
 from dhvani.router import Candidate, delta_for, plan
-
-
-def _duration_ms(segment) -> int:
-    return segment.t_end_ms - segment.t_start_ms
 
 
 def escalate(source_id, entries, segments, backend, store, delta_table,
@@ -33,7 +37,7 @@ def escalate(source_id, entries, segments, backend, store, delta_table,
             segment_id=e.segment_id,
             tier="tier1",
             risk=e.risk,
-            cost_usd=cost_for_duration_ms(_duration_ms(segments[e.segment_id])),
+            cost_usd=backend.cost_per_call(segments[e.segment_id]),
             delta=delta_for(e.risk, "tier1", delta_table),
         )
         for e in entries

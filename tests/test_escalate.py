@@ -162,3 +162,76 @@ def test_multi_candidate_reservation_is_atomic_on_failure(store):
 
     assert store.total_spend() == pytest.approx(total_before)
     assert store.open_jobs() == []
+
+
+# --- C2: replay must cost nothing and must never reach a live backend ---
+
+class ExplodingClient:
+    """Any call to this is a live billed API call that must never happen."""
+
+    def recognize_pcm(self, pcm, lang):
+        raise AssertionError(
+            "replay mode reached the live Chirp client -- "
+            "replay must never fall back to live"
+        )
+
+
+def _replay_tier1(store, fixtures):
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
+    return SyncAsyncAdapter(Recorded(inner, "replay", str(fixtures), store))
+
+
+def test_replay_escalation_reserves_no_money(store, tmp_path):
+    """escalate() priced every candidate with cost_for_duration_ms()
+    unconditionally, so a replay run -- which makes no paid calls at all --
+    still reserved real dollars against the $20 ceiling for calls that
+    never happened. Pricing now goes through backend.cost_per_call(), and
+    Recorded.cost_per_call() returns 0.0 in replay."""
+    backend = _replay_tier1(store, tmp_path / "fixtures")
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert job_id is not None, "replay must still plan and submit the batch"
+    assert store.total_spend() == 0.0
+
+
+def test_replay_escalation_never_calls_the_live_client(store, tmp_path):
+    """The end-to-end guarantee, not just the price: driving a replay-mode
+    escalation through to results reads fixtures and never touches the
+    injected client (which raises if called)."""
+    from dhvani.ids import variant_slug
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+
+    variant = Tier1Chirp(lang="hi-IN").variant_key
+    fixtures = tmp_path / "fixtures"
+    fixture_dir = fixtures / "tier1" / variant_slug(variant)
+    fixture_dir.mkdir(parents=True)
+    import json as _json
+    for seg_id in SEGMENTS:
+        (fixture_dir / f"{seg_id}.json").write_text(
+            _json.dumps({"text": "from-fixture", "signals": {}}))
+
+    backend = _replay_tier1(store, fixtures)
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    results = backend.poll(job_id)  # would raise AssertionError if live
+    assert all(r["text"] == "from-fixture" for r in results.values())
+    assert store.total_spend() == 0.0
+
+
+def test_live_escalation_still_reserves_the_real_cost(store):
+    """The replay fix must not make live calls free: a live-mode backend
+    still prices through Tier1Chirp.cost_per_call, i.e. the one and only
+    cost model, cost_for_duration_ms()."""
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+
+    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
+    backend = SyncAsyncAdapter(Recorded(inner, "live", "fixtures", store))
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert job_id is not None
+    # Exactly one candidate ("a", 3000ms) is ever selected -- see
+    # test_escalation_fails_closed_at_the_ceiling for why.
+    assert store.total_spend() == pytest.approx(cost_for_duration_ms(3000))

@@ -77,7 +77,18 @@ def main(argv=None) -> int:
             source = os.path.basename(args.audio)
             # Real Segments, not stubs: Tier1Chirp.transcribe() reads .pcm.
             segments = {s.segment_id: s for s in split(pcm)}
-            tier1 = SyncAsyncAdapter(Tier1Chirp(lang=f"{args.lang}-IN"))
+            # Recorded is the ONLY thing that enforces "replay never falls
+            # back to live" (fix round 3, C2). Building the adapter over a
+            # bare Tier1Chirp meant --mode replay was ignored entirely for
+            # Tier 1: anyone who installed the `cloud` extra to record
+            # fixtures got a real billed API call out of a replay-mode
+            # command. Ordering matters -- Recorded wraps the sync backend,
+            # SyncAsyncAdapter wraps Recorded -- so the mode check happens
+            # on the way to the paid call, not around the async shell.
+            tier1 = SyncAsyncAdapter(
+                Recorded(Tier1Chirp(lang=f"{args.lang}-IN"),
+                         args.mode, args.fixtures, store)
+            )
 
             if store.latest_track_version(source) == 0:
                 store.put_track(source, 1, POLICY_ID,

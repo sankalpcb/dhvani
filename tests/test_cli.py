@@ -75,6 +75,42 @@ def test_cli_replay_mode_runs_end_to_end_without_torch(tmp_path, capsys):
     assert all(entry["band"] in {"ship", "marked", "review"} for entry in track)
 
 
+def test_cli_emits_metrics_summary_on_stderr_and_leaves_stdout_alone(tmp_path, capsys):
+    """I7: the CLI must surface timing metrics, but ONLY on stderr -- stdout
+    carries the caption track JSON and --out asserts it matches stdout
+    byte-for-byte, so metrics leaking onto stdout would break that."""
+    wav_path = tmp_path / "clip.wav"
+    _write_wav(wav_path)
+
+    samples, rate = sf.read(str(wav_path))
+    pcm = normalize(samples, rate)
+    segments = split(pcm)
+
+    fixtures_dir = tmp_path / "fixtures"
+    tier0_dir = (fixtures_dir / "tier0"
+                 / variant_slug(Tier0Conformer(lang="hi").variant_key))
+    tier0_dir.mkdir(parents=True)
+    for seg in segments:
+        (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": "नमस्ते world",
+            "signals": {"ctc_rnnt_disagreement": 0.1},
+        }))
+
+    exit_code = main([
+        str(wav_path),
+        "--db", str(tmp_path / "t.db"),
+        "--mode", "replay",
+        "--fixtures", str(fixtures_dir),
+        "--delta-table", str(tmp_path / "no-such-delta-table.json"),
+    ])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    track = json.loads(captured.out)
+    assert len(track) == len(segments)
+    assert "tier0" in captured.err
+
+
 def test_cli_help_runs_without_error():
     """Sanity check: --help must exit 0 and never construct a backend."""
     try:
@@ -147,3 +183,86 @@ def test_cli_persists_the_track_to_out_path(tmp_path, capsys):
     # The whole point: report_cli must accept exactly this file. This is
     # `make bench`'s input contract, end to end.
     assert report_main([str(out_path)]) == 0
+
+
+# --- Fix round 3, C2/C3: the async path through the shipped CLI ---
+
+ALL_BUCKETS = {f"{i/10:.1f}-{(i+1)/10:.1f}": 20.0 for i in range(10)}
+
+
+def _prepare(tmp_path, wav_path):
+    """Write the wav plus tier0 AND tier1 fixtures for every segment.
+
+    Returns (fixtures_dir, delta_table_path, segments).
+    """
+    _write_wav(wav_path)
+    samples, rate = sf.read(str(wav_path))
+    segments = split(normalize(samples, rate))
+
+    fixtures = tmp_path / "fixtures"
+    tier0_dir = fixtures / "tier0" / variant_slug(Tier0Conformer(lang="hi").variant_key)
+    tier0_dir.mkdir(parents=True)
+    for seg in segments:
+        (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": "नमस्ते world", "signals": {"ctc_rnnt_disagreement": 0.1},
+        }))
+
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+    tier1_dir = fixtures / "tier1" / variant_slug(Tier1Chirp(lang="hi-IN").variant_key)
+    tier1_dir.mkdir(parents=True)
+    for seg in segments:
+        (tier1_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": "escalated-by-chirp", "signals": {},
+        }))
+
+    delta_path = tmp_path / "delta.json"
+    delta_path.write_text(json.dumps({"tier1": ALL_BUCKETS}))
+    return fixtures, delta_path, segments
+
+
+def test_cli_escalate_in_replay_mode_never_makes_a_live_call(tmp_path, capsys):
+    """C2: cli.py built SyncAsyncAdapter(Tier1Chirp(...)) with no Recorded
+    wrapper, and Recorded is the only enforcer of "replay never falls back
+    to live" -- so --mode replay was ignored entirely for Tier 1.
+
+    This environment has no google-cloud-speech installed, so an actual
+    live call raises ModuleNotFoundError from _default_client(); with the
+    cloud extra installed it would instead be a real billed request. Either
+    way, a replay-mode command must never get there.
+    """
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, segments = _prepare(tmp_path, wav_path)
+
+    exit_code = main([
+        str(wav_path),
+        "--db", str(tmp_path / "t.db"),
+        "--mode", "replay",
+        "--fixtures", str(fixtures),
+        "--delta-table", str(delta_path),
+        "--budget", "10.0",
+        "--escalate", "--reconcile",
+    ])
+
+    assert exit_code == 0
+    track = json.loads(capsys.readouterr().out)
+    assert len(track) == len(segments)
+
+
+def test_cli_replay_escalation_reserves_no_money(tmp_path, capsys):
+    """Replay makes no paid calls, so it must reserve nothing against the
+    $20 ceiling -- escalate() used to price at the live rate regardless."""
+    from dhvani.store import Store
+
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, _ = _prepare(tmp_path, wav_path)
+    db = tmp_path / "t.db"
+
+    assert main([
+        str(wav_path), "--db", str(db), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+        "--budget", "10.0", "--escalate", "--reconcile",
+    ]) == 0
+    capsys.readouterr()
+
+    with Store(str(db)) as store:
+        assert store.total_spend() == 0.0

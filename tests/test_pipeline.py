@@ -85,6 +85,25 @@ def test_second_run_hits_cache_and_does_not_recall_backend(store):
     assert CountingTier0.calls == first, "cached segments must not be re-transcribed"
 
 
+def test_run_populates_samples_when_given(store):
+    """I7: run() times the real Tier 0 work into the caller's dict when
+    given one, under the "tier0" stage key."""
+    samples = {}
+    entries = run(_audio(), "vid1", StubTier0(), store, {}, budget_usd=0.0,
+                  samples=samples)
+    assert len(entries) >= 1
+    assert "tier0" in samples
+    assert len(samples["tier0"]) >= 1
+    assert all(isinstance(v, float) and v >= 0.0 for v in samples["tier0"])
+
+
+def test_run_without_samples_behaves_identically_to_before(store):
+    """Existing callers that pass nothing must be unaffected."""
+    entries = run(_audio(), "vid1", StubTier0(), store, {}, budget_usd=0.0)
+    assert len(entries) >= 1
+    assert all(e.text for e in entries)
+
+
 def test_zero_budget_still_produces_a_full_track(store):
     """Graceful degradation."""
     entries = run(_audio(), "vid1", StubTier0(), store, {}, budget_usd=0.0)

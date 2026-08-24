@@ -1,0 +1,505 @@
+import numpy as np
+import pytest
+
+from dhvani.backends.async_base import SyncAsyncAdapter
+from dhvani.escalate import escalate
+from dhvani.pipeline import TrackEntry
+from dhvani.reconcile import MAX_JOB_ATTEMPTS, reconcile
+from dhvani.segmenter import Segment
+from dhvani.store import Store
+from dhvani.track import entries_to_json, entries_from_json
+from dhvani.config import POLICY_ID
+
+
+class StubSync:
+    name = "tier1"
+    variant_key = "tier1|hi-IN"
+
+    def cost_per_call(self, segment):
+        return 0.00075
+
+    def transcribe(self, segment):
+        return {"text": "escalated", "signals": {"ctc_rnnt_disagreement": 0.0}}
+
+
+@pytest.fixture
+def store(tmp_path):
+    with Store(str(tmp_path / "t.db")) as s:
+        yield s
+
+
+ENTRIES = [TrackEntry("a" * 64, 0, 3000, "raw", 0.65, "review"),
+           TrackEntry("b" * 64, 3000, 6000, "raw", 0.05, "ship")]
+SEGMENTS = {e.segment_id: Segment(e.segment_id, e.t_start_ms, e.t_end_ms,
+                                  np.zeros(10, dtype=np.int16))
+            for e in ENTRIES}
+TABLE = {"tier1": {"0.6-0.7": 18.0}}
+
+
+def _seed_v1(store):
+    store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+
+
+def test_reconcile_with_no_jobs_leaves_the_version_alone(store):
+    _seed_v1(store)
+    assert reconcile("vid1", SyncAsyncAdapter(StubSync()), store) == 1
+
+
+def test_reconcile_advances_the_version_when_results_arrive(store):
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    assert reconcile("vid1", backend, store) == 2
+
+
+def test_reconciled_track_contains_the_escalated_text(store):
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    version = reconcile("vid1", backend, store)
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    assert merged[0].text == "escalated"
+    assert merged[1].text == "raw"
+
+
+def test_pending_job_does_not_advance_the_version(store):
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync(), pending_polls=5)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    assert reconcile("vid1", backend, store) == 1
+
+
+def test_completed_job_is_marked_done(store):
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    reconcile("vid1", backend, store)
+    assert store.get_job(job_id)["state"] == "done"
+
+
+def test_reconciling_twice_does_not_advance_twice(store):
+    """Invariant I2 at the reconciler level: a settled job is not re-merged."""
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    first = reconcile("vid1", backend, store)
+    second = reconcile("vid1", backend, store)
+    assert first == second == 2
+
+
+def test_reconcile_never_loses_segments(store):
+    """Invariant I1."""
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    version = reconcile("vid1", backend, store)
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    assert sorted(e.segment_id for e in merged) == \
+           sorted(e.segment_id for e in ENTRIES)
+
+
+class PartialDeliveryBackend:
+    """Wraps a real AsyncBackend but truncates poll() results to a subset
+    of the job's segments, simulating a batch that only partially completed.
+    """
+
+    def __init__(self, inner, keep: int):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+        self.keep = keep
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        results = self.inner.poll(job_id)
+        if results is None:
+            return None
+        keys = list(results.keys())[: self.keep]
+        return {k: results[k] for k in keys}
+
+
+def test_partial_delivery_leaves_job_running_not_done(store):
+    """A batch that returns results for only some of its registered
+    segment_ids must not settle the job -- the missing segments would
+    otherwise never be retried, breaking convergence with a synchronous
+    run (invariant I1 at the job level).
+
+    escalate() only ever selects one of these two entries (TABLE has no
+    bucket for entry b's risk), so the batch is submitted directly here,
+    registering both segment_ids on one job, to exercise a genuine
+    multi-segment partial delivery.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync())
+    batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
+    job_id = inner.submit(batch)
+    store.put_job(job_id, inner.name, inner.variant_key,
+                  [s.segment_id for s in batch], "vid1")
+
+    backend = PartialDeliveryBackend(inner, keep=1)
+    reconcile("vid1", backend, store)
+    job = store.get_job(job_id)
+    assert job["state"] == "running"
+    assert job_id in [j["job_id"] for j in store.open_jobs()]
+
+
+class StaleVersionStore:
+    """Wraps a real Store so its FIRST latest_track_version() call returns
+    a stale value, as if that read had happened before a concurrent writer
+    committed a newer version -- everything else (get_track, put_track,
+    job methods, and any later latest_track_version() call) goes straight
+    to the real store, which already reflects the concurrent write.
+
+    This is what lets a single-threaded test reproduce the race: by the
+    time reconcile()'s own put_track() runs, the version it computed from
+    the stale read collides with what the "other writer" already landed.
+    """
+
+    def __init__(self, inner, stale_version: int):
+        self._inner = inner
+        self._stale_version = stale_version
+        self._served_stale = False
+
+    def latest_track_version(self, source_id: str) -> int:
+        if not self._served_stale:
+            self._served_stale = True
+            return self._stale_version
+        return self._inner.latest_track_version(source_id)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_lost_race_on_put_track_does_not_settle_job_or_lose_result(store):
+    """put_track() is INSERT OR IGNORE: on a (source_id, version) collision
+    it returns False and writes nothing. If reconcile() ignored that and
+    marked the job done anyway, the merged result would exist nowhere
+    durable and the job would never be retried -- a silent I1 violation.
+
+    Reproduces the race directly: seed v1, escalate a job, then have a
+    second writer land v2 (with content that is NOT the merge) -- and make
+    reconcile()'s own latest_track_version() read return the stale v1, as
+    if that read happened before the other writer's commit, so its own
+    put_track(vid1, 2, ...) collides with what the other writer already
+    landed. reconcile() must not claim a version it did not write, must
+    leave the job open for retry, and a later pass -- now racing against
+    nothing -- must succeed.
+    """
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync())
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+
+    # A concurrent writer lands version 2 first, with content that is not
+    # the escalated merge (here, an untouched copy of v1's raw entries).
+    store.put_track("vid1", 2, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+
+    # reconcile() reads a stale latest_track_version() (1) -- as if its
+    # read raced ahead of the other writer's commit -- so it computes
+    # new_version = 2 and collides with what's already there.
+    stale_store = StaleVersionStore(store, stale_version=1)
+
+    lost_race_version = reconcile("vid1", backend, stale_store)
+
+    # reconcile() must report the version actually in the store (read via
+    # its second, non-stale latest_track_version() call), not the version
+    # it attempted -- and failed -- to write.
+    assert lost_race_version == 2
+    stored = entries_from_json(store.get_track("vid1", lost_race_version)["content_json"])
+    assert [e.text for e in stored] == ["raw", "raw"]
+
+    # The job's result was not persisted anywhere -- it must remain open
+    # for retry, not settled as done.
+    job = store.get_job(job_id)
+    assert job["state"] == "running"
+    assert job_id in [j["job_id"] for j in store.open_jobs()]
+
+    # A later pass, now racing against nothing (real store, no stale
+    # read), must succeed and actually merge the escalated text in -- this
+    # is what proves recovery works rather than just failing quietly.
+    recovered_version = reconcile("vid1", backend, store)
+    assert recovered_version == 3
+    merged = entries_from_json(store.get_track("vid1", recovered_version)["content_json"])
+    assert merged[0].text == "escalated"
+    assert store.get_job(job_id)["state"] == "done"
+
+
+# --- C1: a reconcile() pass must never touch another source's jobs ---
+
+OTHER_ENTRIES = [TrackEntry("c" * 64, 0, 3000, "raw", 0.65, "review")]
+OTHER_SEGMENTS = {e.segment_id: Segment(e.segment_id, e.t_start_ms, e.t_end_ms,
+                                        np.zeros(11, dtype=np.int16))
+                  for e in OTHER_ENTRIES}
+
+
+def test_reconcile_does_not_settle_another_sources_job(store):
+    """C1: jobs were filtered on tier and variant_key only, never on the
+    source they belong to, so reconcile("vid2") polled and marked done
+    every outstanding tier1 job in the DB -- including vid1's.
+
+    merge_entries() ignores foreign segment_ids, so vid1's *track* was not
+    corrupted. The damage is quieter: vid1's job was settled, dropped out
+    of open_jobs(), and was never retried, so the money already reserved
+    for it bought nothing and its escalated text was unreachable forever.
+    dhvani.cli's --db defaults to one shared path, so two videos really do
+    share a store.
+    """
+    store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+    store.put_track("vid2", 1, POLICY_ID, entries_to_json(OTHER_ENTRIES), 0.0)
+
+    backend = SyncAsyncAdapter(StubSync())
+    job1 = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job2 = escalate("vid2", OTHER_ENTRIES, OTHER_SEGMENTS, backend, store,
+                    TABLE, 10.0)
+    assert job1 != job2
+
+    # Reconcile ONLY vid2. vid1 has not been polled at all.
+    assert reconcile("vid2", backend, store) == 2
+
+    # vid1's job is untouched: still open, still retryable, not settled.
+    assert store.get_job(job1)["state"] in ("pending", "running")
+    assert job1 in [j["job_id"] for j in store.open_jobs("vid1")]
+    assert job1 not in [j["job_id"] for j in store.open_jobs("vid2")]
+    assert store.latest_track_version("vid1") == 1
+
+    # And reconciling vid1 afterwards still delivers what was paid for.
+    v1 = reconcile("vid1", backend, store)
+    assert v1 == 2
+    merged = entries_from_json(store.get_track("vid1", v1)["content_json"])
+    assert merged[0].text == "escalated"
+    assert store.get_job(job1)["state"] == "done"
+
+
+def test_reconcile_ignores_a_foreign_job_even_at_the_same_version(store):
+    """The foreign job must not even be polled: a job for another source
+    contributes nothing this track can merge, so letting it in can only
+    settle it wrongly."""
+    store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+    store.put_track("vid2", 1, POLICY_ID, entries_to_json(OTHER_ENTRIES), 0.0)
+
+    polled = []
+
+    class RecordingBackend(SyncAsyncAdapter):
+        def poll(self, job_id):
+            polled.append(job_id)
+            return super().poll(job_id)
+
+    backend = RecordingBackend(StubSync())
+    job1 = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job2 = escalate("vid2", OTHER_ENTRIES, OTHER_SEGMENTS, backend, store,
+                    TABLE, 10.0)
+
+    reconcile("vid2", backend, store)
+    assert polled == [job2]
+    assert job1 not in polled
+
+
+# --- I6: a poisoned job must not starve every other job forever ---
+
+class RaisingForOneJobBackend:
+    """Wraps a real AsyncBackend so poll() raises for one specific job_id
+    and behaves normally for every other job. Models a single permanently
+    broken job (TransientError, JobNotFound, ...) that must not abort the
+    whole reconcile() pass.
+    """
+
+    def __init__(self, inner, bad_job_id):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+        self.bad_job_id = bad_job_id
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        if job_id == self.bad_job_id:
+            raise RuntimeError("injected poll failure")
+        return self.inner.poll(job_id)
+
+
+def test_a_poisoned_job_does_not_starve_other_open_jobs(store):
+    """reconcile() has no per-job exception isolation before the fix: an
+    unguarded backend.poll() that raises for one job propagates out of
+    reconcile() entirely, abandoning the whole pass. Because open_jobs()
+    is ORDER BY job_id, a permanently-failing job whose id sorts first
+    starves every other job on that backend indefinitely -- reconcile()
+    never even reaches them. This must fail before the fix: reconcile()
+    raises RuntimeError instead of returning.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync())
+
+    job_a = inner.submit([SEGMENTS[ENTRIES[0].segment_id]])
+    job_b = inner.submit([SEGMENTS[ENTRIES[1].segment_id]])
+    store.put_job(job_a, inner.name, inner.variant_key,
+                  [ENTRIES[0].segment_id], "vid1")
+    store.put_job(job_b, inner.name, inner.variant_key,
+                  [ENTRIES[1].segment_id], "vid1")
+
+    # Poison whichever job sorts FIRST -- that's the ordering open_jobs()
+    # actually produces, and the one that starved the queue before the fix.
+    bad_job_id, good_job_id = sorted([job_a, job_b])
+    good_segment_id = (ENTRIES[1].segment_id if good_job_id == job_b
+                       else ENTRIES[0].segment_id)
+
+    backend = RaisingForOneJobBackend(inner, bad_job_id)
+
+    version = reconcile("vid1", backend, store)  # must not raise
+
+    assert store.get_job(good_job_id)["state"] == "done"
+    assert store.get_job(bad_job_id)["state"] == "running"
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    good_entry = next(e for e in merged if e.segment_id == good_segment_id)
+    assert good_entry.text == "escalated"
+
+
+class AlwaysRaisingBackend:
+    """poll() raises on every single call, for every job. Models a
+    permanently broken job -- a worker that crashed, a queue partition
+    that will never come back -- as opposed to a transient fault that
+    eventually clears.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        raise RuntimeError("injected permanent poll failure")
+
+
+def test_pending_polls_do_not_burn_the_dead_letter_budget(store):
+    """A pending poll (backend.poll() returns None) must not count toward
+    MAX_JOB_ATTEMPTS: the job has not failed at anything, it just isn't
+    ready yet. Before the fix, bump_job_attempts() was called on every
+    single pass regardless of what poll() returned, so a backend with
+    startup latency alone (never once failing or delivering incomplete
+    results) could exceed MAX_JOB_ATTEMPTS and be dead-lettered purely
+    from waiting. Six pending polls, one more than MAX_JOB_ATTEMPTS (5),
+    followed by a complete delivery, must still reach "done" with attempts
+    that never exceeded MAX_JOB_ATTEMPTS.
+    """
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync(), pending_polls=MAX_JOB_ATTEMPTS + 1)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+
+    max_attempts_seen = 0
+    for _ in range(MAX_JOB_ATTEMPTS + 2):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        max_attempts_seen = max(max_attempts_seen, job["attempts"])
+        assert job["state"] != "failed"
+
+    job = store.get_job(job_id)
+    assert job["state"] == "done"
+    assert max_attempts_seen <= MAX_JOB_ATTEMPTS
+
+
+def test_pending_polls_then_a_partial_delivery_still_converges(store):
+    """The exact reproduction: a backend that takes several polls to become
+    ready and then delivers one partial batch must not be dead-lettered on
+    that first partial delivery. Only a poll that actually fails (raises,
+    or delivers an incomplete result) should count against
+    MAX_JOB_ATTEMPTS -- pending polls are free. pending_polls=6 plus a
+    partial-then-complete delivery pattern (mirroring ChaosBackend's
+    "partial" fault: truncate on the first real delivery, full set after)
+    must still converge to "done" with every segment escalated.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync(), pending_polls=6)
+    batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
+    job_id = inner.submit(batch)
+    store.put_job(job_id, inner.name, inner.variant_key,
+                  [s.segment_id for s in batch], "vid1")
+
+    backend = PartialThenCompleteBackend(inner)
+
+    for _ in range(15):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        if job["state"] == "done":
+            break
+        assert job["state"] != "failed"
+
+    job = store.get_job(job_id)
+    assert job["state"] == "done"
+    version = store.latest_track_version("vid1")
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    assert [e.text for e in merged] == ["escalated", "escalated"]
+
+
+class PartialThenCompleteBackend:
+    """Like PartialDeliveryBackend, but heals after its first real
+    (non-None) delivery -- mirrors ChaosBackend's "partial" fault (Fix
+    round 1): a batch that comes back incomplete once and completes on
+    retry, not a permanently broken job.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+        self._delivered = set()
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        results = self.inner.poll(job_id)
+        if results is None:
+            return None
+        if job_id in self._delivered:
+            return results
+        self._delivered.add(job_id)
+        keys = list(results.keys())[:1]
+        return {k: results[k] for k in keys}
+
+
+def test_a_permanently_failing_job_is_dead_lettered_after_max_attempts(store):
+    """After MAX_JOB_ATTEMPTS failed attempts, bump_job_attempts()'s return
+    value -- previously discarded entirely -- must be used to dead-letter
+    the job: state becomes "failed" and it disappears from open_jobs(), so
+    it stops being polled (and stops starving the queue) on every future
+    pass. Assert the exact attempt at which this happens, not just that it
+    eventually does.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync())
+    batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
+    job_id = inner.submit(batch)
+    store.put_job(job_id, inner.name, inner.variant_key,
+                  [s.segment_id for s in batch], "vid1")
+
+    backend = AlwaysRaisingBackend(inner)
+
+    for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        assert job["attempts"] == attempt
+        assert job["state"] == "running"
+        assert job_id in [j["job_id"] for j in store.open_jobs("vid1")]
+
+    # One more failing attempt pushes attempts strictly past MAX_JOB_ATTEMPTS.
+    reconcile("vid1", backend, store)
+    job = store.get_job(job_id)
+    assert job["attempts"] == MAX_JOB_ATTEMPTS + 1
+    assert job["state"] == "failed"
+    assert job_id not in [j["job_id"] for j in store.open_jobs("vid1")]

@@ -839,9 +839,11 @@ def escalate(entries, segments, backend, store, delta_table, budget_usd):
     if not chosen:
         return None
 
-    # Reserve the whole batch atomically-per-call before anything is sent.
-    for cand in chosen:
-        store.reserve_spend(backend.name, cand.cost_usd)
+    # ONE reservation for the whole batch, not one per candidate. A loop can
+    # partially succeed then raise, leaving spend reserved for a batch that was
+    # never submitted -- money that buys nothing and cannot be recovered.
+    total_cost = sum(cand.cost_usd for cand in chosen)
+    store.reserve_spend(backend.name, total_cost)
 
     batch = [segments[c.segment_id] for c in chosen]
 
@@ -1049,13 +1051,21 @@ def reconcile(source_id: str, backend, store) -> int:
 
         settled.append(job["job_id"])
 
-    if not updates:
-        return version
-
-    merged = merge_entries(entries, updates)
-    new_version = version + 1
-    store.put_track(source_id, new_version, POLICY_ID,
-                    entries_to_json(merged), current["cost_usd"])
+    if updates:
+        merged = merge_entries(entries, updates)
+        new_version = version + 1
+        wrote = store.put_track(source_id, new_version, POLICY_ID,
+                                entries_to_json(merged), current["cost_usd"])
+        if not wrote:
+            # INSERT OR IGNORE: another writer landed this version first, so
+            # our merge was NEVER written. Marking jobs done here would make
+            # the result permanently unrecoverable (I1 violation). Fail safe:
+            # leave them running for the next pass, report the real version.
+            for job_id in settled:
+                store.set_job_state(job_id, "running")
+            return store.latest_track_version(source_id)
+    else:
+        new_version = version
 
     for job_id in settled:
         store.set_job_state(job_id, "done")
@@ -1221,6 +1231,7 @@ class ChaosBackend:
         self.variant_key = inner.variant_key
         self.faults = tuple(faults)
         self.seed = seed
+        self._partial_delivered: set[str] = set()  # jobs already truncated once
 
     def cost_per_call(self, segment) -> float:
         return self.inner.cost_per_call(segment)
@@ -1243,9 +1254,15 @@ class ChaosBackend:
         rng = random.Random(f"{self.seed}:{job_id}")
         items = sorted(results.items())
 
-        if "partial" in self.faults and len(items) > 1:
+        # Truncate only the FIRST time this job would deliver results.
+        # "partial" models a batch that comes back incomplete once and
+        # completes on retry — not a permanently broken job. Without the
+        # heal, convergence (I6) is unreachable under this fault.
+        if ("partial" in self.faults and len(items) > 1
+                and job_id not in self._partial_delivered):
             keep = max(1, len(items) // 2)
             items = items[:keep]
+            self._partial_delivered.add(job_id)
 
         if "reorder" in self.faults:
             rng.shuffle(items)
@@ -1516,11 +1533,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.metrics'`
 """Timing and throughput instrumentation (spec §9.1).
 
 Deliberately dependency-free and deterministic in shape: percentile() uses
-linear interpolation over a sorted copy, so the same samples always give the
-same summary. Timing values themselves vary run to run, which is why no test
+the nearest-rank method over a sorted copy, so the same samples always give
+the same summary. Timing values themselves vary run to run, which is why no test
 asserts a specific duration.
 """
 
+import math
 import time
 
 
@@ -1541,19 +1559,20 @@ class Timer:
 
 
 def percentile(values, p: float) -> float:
-    """Linear-interpolated percentile. p is a fraction in [0, 1]."""
+    """Nearest-rank percentile: rank = ceil(p * n). p is a fraction in [0, 1].
+
+    Nearest-rank, NOT linear interpolation. A latency percentile should report
+    an actual observed sample, not a synthetic value between two measurements.
+    An earlier draft of this plan specified interpolation while its own tests
+    pinned nearest-rank — the tests were right.
+    """
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"p must be between 0 and 1, got {p}")
     if not values:
         return 0.0
     ordered = sorted(values)
-    if len(ordered) == 1:
-        return float(ordered[0])
-    position = p * (len(ordered) - 1)
-    low = int(position)
-    high = min(low + 1, len(ordered) - 1)
-    weight = position - low
-    return float(ordered[low] * (1.0 - weight) + ordered[high] * weight)
+    rank = max(1, math.ceil(p * len(ordered)))
+    return float(ordered[rank - 1])
 
 
 def summarize(samples: dict) -> dict:

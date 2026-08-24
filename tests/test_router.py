@@ -95,3 +95,29 @@ def test_bucket_of_handles_risk_above_one():
     """bucket_of clamps risk > 1 to [0, 1] range."""
     assert bucket_of(1.5) == "0.9-1.0"
     assert bucket_of(2.0) == "0.9-1.0"
+
+
+def test_free_candidates_are_selected_and_rank_first():
+    """FIX ROUND 3 (C2): zero-cost candidates used to be filtered out by
+    the ratio sort's division-by-zero guard, which doubled as policy. Once
+    escalate() priced through backend.cost_per_call(), replay mode priced
+    everything at 0.0 and the router selected nothing -- --mode replay
+    could never escalate. A positive-delta improvement that costs nothing
+    is the best possible buy, so it must be selected and must sort first.
+    """
+    free = c("free", delta=1.0, cost=0.0)
+    priced = c("priced", delta=100.0, cost=0.01)
+    chosen = plan([priced, free], budget_usd=1000.0)
+    assert [x.segment_id for x in chosen] == ["free", "priced"]
+
+
+def test_free_candidates_do_not_consume_budget():
+    chosen = plan([c(str(i), delta=1.0, cost=0.0) for i in range(5)],
+                  budget_usd=0.0)
+    assert len(chosen) == 5
+    assert sum(x.cost_usd for x in chosen) == 0.0
+
+
+def test_negative_cost_candidates_are_still_excluded():
+    """A negative price is nonsense, not a bargain."""
+    assert plan([c("bogus", delta=1.0, cost=-1.0)], budget_usd=1000.0) == []

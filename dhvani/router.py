@@ -11,9 +11,17 @@ warrant exact dynamic programming. See test_greedy_is_knowingly_suboptimal_with_
 for a concrete counterexample with artificial costs.
 """
 
+import math
 from dataclasses import dataclass
 
 N_BUCKETS = 10
+
+
+def _ratio(cand) -> float:
+    """Expected improvement per dollar. Free improvements rank first."""
+    if cand.cost_usd <= 0.0:
+        return math.inf
+    return cand.delta / cand.cost_usd
 
 
 @dataclass(frozen=True)
@@ -53,9 +61,20 @@ def plan(candidates: list[Candidate], budget_usd: float) -> list[Candidate]:
     Invariant I3: candidates with delta <= 0 are never selected.
     Invariant I4: total selected cost never exceeds budget_usd.
     Invariant I5: ties break on segment_id, so output is order-independent.
+
+    FIX ROUND 3 (C2): a zero-cost candidate is eligible and ranks first,
+    rather than being dropped. The old `cost_usd > 0.0` filter was a
+    division-by-zero guard for the ratio sort, but it doubled as a policy
+    -- and once escalate() started pricing through backend.cost_per_call(),
+    replay mode (Recorded.cost_per_call -> 0.0) priced every candidate at
+    zero and the router silently selected nothing, so --mode replay could
+    never escalate at all. A positive-delta improvement that costs nothing
+    is strictly the best thing to buy, so it sorts ahead of everything
+    priced; the guard is now in _ratio() where it belongs. Negative costs
+    remain excluded as nonsense.
     """
-    eligible = [c for c in candidates if c.delta > 0.0 and c.cost_usd > 0.0]
-    eligible.sort(key=lambda c: (-(c.delta / c.cost_usd), c.segment_id, c.tier))
+    eligible = [c for c in candidates if c.delta > 0.0 and c.cost_usd >= 0.0]
+    eligible.sort(key=lambda c: (-_ratio(c), c.segment_id, c.tier))
 
     chosen: list[Candidate] = []
     spent = 0.0

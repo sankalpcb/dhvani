@@ -84,7 +84,7 @@ def main(argv=None) -> int:
                                 entries_to_json(entries), 0.0)
 
             if args.escalate:
-                do_escalate(entries, segments, tier1, store,
+                do_escalate(source, entries, segments, tier1, store,
                             delta_table, args.budget)
             if args.reconcile:
                 do_reconcile(source, tier1, store)

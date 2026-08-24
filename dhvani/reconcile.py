@@ -45,7 +45,7 @@ def reconcile(source_id: str, backend, store) -> int:
     updates: dict[str, dict] = {}
     settled: list[str] = []
 
-    for job in store.open_jobs():
+    for job in store.open_jobs(source_id):
         if job["tier"] != backend.name or job["variant_key"] != backend.variant_key:
             continue
 

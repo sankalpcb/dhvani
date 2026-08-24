@@ -89,7 +89,7 @@ def _track(store, version):
 ])
 def test_i1_no_segment_is_ever_lost_or_duplicated(store, faults):
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=faults, seed=11)
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     entries = _track(store, _drain(backend, store))
     ids = [e.segment_id for e in entries]
     assert len(ids) == N
@@ -101,14 +101,14 @@ def test_i1_no_segment_is_ever_lost_or_duplicated(store, faults):
 def test_i1_holds_when_every_poll_fails(store, faults):
     """A backend that never succeeds must leave the track intact, not corrupt."""
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=faults, seed=5)
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     entries = _track(store, _drain(backend, store))
     assert [e.text for e in entries] == ["raw"] * N
 
 
 def test_i2_reconciling_a_settled_job_repeatedly_is_a_no_op(store):
     backend = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version = _drain(backend, store)
     before = store.get_track("vid1", version)["content_json"]
     for _ in range(5):
@@ -136,13 +136,13 @@ def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
     """
     backend = ChaosBackend(SyncAsyncAdapter(StubSync(), pending_polls=2),
                            faults=("partial", "reorder", "duplicate"), seed=3)
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     async_entries = _track(store, _drain(backend, store, max_passes=60))
 
     with Store(str(tmp_path / "sync.db")) as sync_store:
         sync_store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
         plain = SyncAsyncAdapter(StubSync())
-        escalate(ENTRIES, SEGMENTS, plain, sync_store, TABLE, 10.0)
+        escalate("vid1", ENTRIES, SEGMENTS, plain, sync_store, TABLE, 10.0)
         sync_entries = _track(sync_store, _drain(plain, sync_store))
 
     assert async_entries == sync_entries
@@ -151,11 +151,11 @@ def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
 def test_i6_convergence_is_reachable_from_a_partial_start(store):
     """Partial delivery must not strand segments permanently un-escalated."""
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=("partial",), seed=2)
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     _drain(backend, store)
 
     clean = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, clean, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, clean, store, TABLE, 10.0)
     entries = _track(store, _drain(clean, store))
     assert all(e.text.startswith("fixed-") for e in entries)
 
@@ -210,7 +210,7 @@ def test_i1_holds_under_a_permanently_partial_backend(store):
     not escalate exactly as they were, not blanked.
     """
     backend = PermanentlyPartialBackend(SyncAsyncAdapter(StubSync()))
-    job_id = escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version = _drain(backend, store, max_passes=20)
     entries = _track(store, version)
 

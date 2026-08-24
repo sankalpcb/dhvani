@@ -17,11 +17,16 @@ def _duration_ms(segment) -> int:
     return segment.t_end_ms - segment.t_start_ms
 
 
-def escalate(entries, segments, backend, store, delta_table, budget_usd):
+def escalate(source_id, entries, segments, backend, store, delta_table,
+             budget_usd):
     """Plan escalations, reserve their cost, and submit them. Returns job id.
 
     segments maps segment_id -> Segment. Real Segment objects are required,
     not stubs: Tier1Chirp.transcribe() reads segment.pcm.
+
+    source_id is threaded through to the jobs table (FIX ROUND 3, C1) so
+    reconcile() can poll only its own source's jobs. Without it, one
+    video's reconcile() pass settled every other video's outstanding job.
     """
     candidates = [
         Candidate(
@@ -58,5 +63,5 @@ def escalate(entries, segments, backend, store, delta_table, budget_usd):
 
     job_id = backend.submit(batch)
     store.put_job(job_id, backend.name, backend.variant_key,
-                  [s.segment_id for s in batch])
+                  [s.segment_id for s in batch], source_id)
     return job_id

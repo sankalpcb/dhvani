@@ -48,14 +48,14 @@ def test_reconcile_with_no_jobs_leaves_the_version_alone(store):
 def test_reconcile_advances_the_version_when_results_arrive(store):
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     assert reconcile("vid1", backend, store) == 2
 
 
 def test_reconciled_track_contains_the_escalated_text(store):
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version = reconcile("vid1", backend, store)
     merged = entries_from_json(store.get_track("vid1", version)["content_json"])
     assert merged[0].text == "escalated"
@@ -65,14 +65,14 @@ def test_reconciled_track_contains_the_escalated_text(store):
 def test_pending_job_does_not_advance_the_version(store):
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync(), pending_polls=5)
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     assert reconcile("vid1", backend, store) == 1
 
 
 def test_completed_job_is_marked_done(store):
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    job_id = escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     reconcile("vid1", backend, store)
     assert store.get_job(job_id)["state"] == "done"
 
@@ -81,7 +81,7 @@ def test_reconciling_twice_does_not_advance_twice(store):
     """Invariant I2 at the reconciler level: a settled job is not re-merged."""
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     first = reconcile("vid1", backend, store)
     second = reconcile("vid1", backend, store)
     assert first == second == 2
@@ -91,7 +91,7 @@ def test_reconcile_never_loses_segments(store):
     """Invariant I1."""
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version = reconcile("vid1", backend, store)
     merged = entries_from_json(store.get_track("vid1", version)["content_json"])
     assert sorted(e.segment_id for e in merged) == \
@@ -139,7 +139,7 @@ def test_partial_delivery_leaves_job_running_not_done(store):
     batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
     job_id = inner.submit(batch)
     store.put_job(job_id, inner.name, inner.variant_key,
-                  [s.segment_id for s in batch])
+                  [s.segment_id for s in batch], "vid1")
 
     backend = PartialDeliveryBackend(inner, keep=1)
     reconcile("vid1", backend, store)
@@ -192,7 +192,7 @@ def test_lost_race_on_put_track_does_not_settle_job_or_lose_result(store):
     """
     _seed_v1(store)
     backend = SyncAsyncAdapter(StubSync())
-    job_id = escalate(ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
 
     # A concurrent writer lands version 2 first, with content that is not
     # the escalated merge (here, an untouched copy of v1's raw entries).
@@ -226,3 +226,73 @@ def test_lost_race_on_put_track_does_not_settle_job_or_lose_result(store):
     merged = entries_from_json(store.get_track("vid1", recovered_version)["content_json"])
     assert merged[0].text == "escalated"
     assert store.get_job(job_id)["state"] == "done"
+
+
+# --- C1: a reconcile() pass must never touch another source's jobs ---
+
+OTHER_ENTRIES = [TrackEntry("c" * 64, 0, 3000, "raw", 0.65, "review")]
+OTHER_SEGMENTS = {e.segment_id: Segment(e.segment_id, e.t_start_ms, e.t_end_ms,
+                                        np.zeros(11, dtype=np.int16))
+                  for e in OTHER_ENTRIES}
+
+
+def test_reconcile_does_not_settle_another_sources_job(store):
+    """C1: jobs were filtered on tier and variant_key only, never on the
+    source they belong to, so reconcile("vid2") polled and marked done
+    every outstanding tier1 job in the DB -- including vid1's.
+
+    merge_entries() ignores foreign segment_ids, so vid1's *track* was not
+    corrupted. The damage is quieter: vid1's job was settled, dropped out
+    of open_jobs(), and was never retried, so the money already reserved
+    for it bought nothing and its escalated text was unreachable forever.
+    dhvani.cli's --db defaults to one shared path, so two videos really do
+    share a store.
+    """
+    store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+    store.put_track("vid2", 1, POLICY_ID, entries_to_json(OTHER_ENTRIES), 0.0)
+
+    backend = SyncAsyncAdapter(StubSync())
+    job1 = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job2 = escalate("vid2", OTHER_ENTRIES, OTHER_SEGMENTS, backend, store,
+                    TABLE, 10.0)
+    assert job1 != job2
+
+    # Reconcile ONLY vid2. vid1 has not been polled at all.
+    assert reconcile("vid2", backend, store) == 2
+
+    # vid1's job is untouched: still open, still retryable, not settled.
+    assert store.get_job(job1)["state"] in ("pending", "running")
+    assert job1 in [j["job_id"] for j in store.open_jobs("vid1")]
+    assert job1 not in [j["job_id"] for j in store.open_jobs("vid2")]
+    assert store.latest_track_version("vid1") == 1
+
+    # And reconciling vid1 afterwards still delivers what was paid for.
+    v1 = reconcile("vid1", backend, store)
+    assert v1 == 2
+    merged = entries_from_json(store.get_track("vid1", v1)["content_json"])
+    assert merged[0].text == "escalated"
+    assert store.get_job(job1)["state"] == "done"
+
+
+def test_reconcile_ignores_a_foreign_job_even_at_the_same_version(store):
+    """The foreign job must not even be polled: a job for another source
+    contributes nothing this track can merge, so letting it in can only
+    settle it wrongly."""
+    store.put_track("vid1", 1, POLICY_ID, entries_to_json(ENTRIES), 0.0)
+    store.put_track("vid2", 1, POLICY_ID, entries_to_json(OTHER_ENTRIES), 0.0)
+
+    polled = []
+
+    class RecordingBackend(SyncAsyncAdapter):
+        def poll(self, job_id):
+            polled.append(job_id)
+            return super().poll(job_id)
+
+    backend = RecordingBackend(StubSync())
+    job1 = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job2 = escalate("vid2", OTHER_ENTRIES, OTHER_SEGMENTS, backend, store,
+                    TABLE, 10.0)
+
+    reconcile("vid2", backend, store)
+    assert polled == [job2]
+    assert job1 not in polled

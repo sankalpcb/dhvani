@@ -44,18 +44,18 @@ TABLE = {"tier1": {"0.6-0.7": 18.0}}
 
 
 def test_zero_budget_submits_nothing(store):
-    assert escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+    assert escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                     store, TABLE, budget_usd=0.0) is None
 
 
 def test_empty_delta_table_submits_nothing(store):
     """No measured improvement means no candidate has positive delta."""
-    assert escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+    assert escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                     store, {}, budget_usd=10.0) is None
 
 
 def test_escalation_registers_a_job_with_the_selected_segments(store):
-    job_id = escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+    job_id = escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                       store, TABLE, budget_usd=10.0)
     assert job_id is not None
     job = store.get_job(job_id)
@@ -65,13 +65,13 @@ def test_escalation_registers_a_job_with_the_selected_segments(store):
 
 
 def test_low_risk_segments_are_not_escalated(store):
-    job_id = escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+    job_id = escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                       store, TABLE, budget_usd=10.0)
     assert "b" * 64 not in store.get_job(job_id)["segment_ids"]
 
 
 def test_spend_is_reserved_before_submission(store):
-    escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+    escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
              store, TABLE, budget_usd=10.0)
     assert store.total_spend() > 0.0
 
@@ -91,14 +91,14 @@ def test_escalation_fails_closed_at_the_ceiling(store):
     almost_full = 20.0 - cost_for_duration_ms(3000) + 0.0001
     store.reserve_spend("tier1", almost_full)
     with pytest.raises(BudgetExceeded):
-        escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
+        escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                  store, TABLE, budget_usd=10.0)
 
 
 def test_resubmitting_the_same_batch_is_idempotent(store):
     backend = SyncAsyncAdapter(StubSync())
-    first = escalate(_entries(), SEGMENTS, backend, store, TABLE, 10.0)
-    second = escalate(_entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    first = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    second = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
     assert first == second
 
 
@@ -134,7 +134,7 @@ def test_multi_candidate_batch_reserves_summed_cost_in_one_call(store):
 
     store.reserve_spend = spy
 
-    job_id = escalate(_multi_entries(), MULTI_SEGMENTS, SyncAsyncAdapter(StubSync()),
+    job_id = escalate("vid1", _multi_entries(), MULTI_SEGMENTS, SyncAsyncAdapter(StubSync()),
                       store, MULTI_TABLE, budget_usd=10.0)
 
     assert job_id is not None
@@ -157,7 +157,7 @@ def test_multi_candidate_reservation_is_atomic_on_failure(store):
     total_before = store.total_spend()
 
     with pytest.raises(BudgetExceeded):
-        escalate(_multi_entries(), MULTI_SEGMENTS, SyncAsyncAdapter(StubSync()),
+        escalate("vid1", _multi_entries(), MULTI_SEGMENTS, SyncAsyncAdapter(StubSync()),
                  store, MULTI_TABLE, budget_usd=10.0)
 
     assert store.total_spend() == pytest.approx(total_before)

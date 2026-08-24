@@ -77,3 +77,16 @@ def test_collect_spans_requested_languages(store):
 def test_collect_carries_duration_for_later_pricing(store):
     out = collect(_corpus(1), StubTier0(), store, ["hi-IN"], per_lang=1)
     assert out[0]["duration_ms"] == 2000
+
+
+def test_collect_records_the_tier0_variant_it_stored_under(store):
+    """C1: phase 2 is a separate process and cannot re-derive this key.
+    Whatever cache key the hypothesis went in under must travel in
+    scored.json, or the escalate pass looks under the wrong one and skips
+    every segment."""
+    tier0 = StubTier0()
+    out = collect(_corpus(2), tier0, store, ["hi-IN"], per_lang=2)
+    assert all(s["tier0_variant"] == tier0.variant_key for s in out)
+    for s in out:
+        assert store.get_hypothesis(s["segment_id"], "tier0",
+                                    s["tier0_variant"]) is not None

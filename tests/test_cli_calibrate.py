@@ -26,11 +26,19 @@ def test_escalate_subcommand_exists():
     assert exc.value.code == 0
 
 
+# The Tier 0 cache key collect() ACTUALLY writes — Tier0Conformer.variant_key
+# for the default Hindi configuration. Seeding hypotheses under "" (which two
+# of these tests used to do) matched the C1 bug rather than production: the
+# CLI looked up "" too, so the tests passed while every real run skipped
+# every segment. Anything that seeds a Tier 0 hypothesis for the CLI to find
+# must use this.
+TIER0_VARIANT = "lang=hi;model_id=ai4bharat/indic-conformer-600m-multilingual"
+
+
 def _seed_scored(tmp_path, n=25, risk=0.65, prefix="s"):
     """A scored.json with one populated bucket, so escalate reaches its cost
     gate instead of exiting early on a missing input file."""
-    scored = [{"segment_id": f"{prefix}{i:04d}" + "0" * 59, "risk": risk,
-               "lang": "hi-IN", "duration_ms": 3000} for i in range(n)]
+    scored = _seed_scored_items(n=n, risk=risk, prefix=prefix)
     path = tmp_path / "scored.json"
     path.write_text(json.dumps(scored))
     return str(path)
@@ -38,7 +46,8 @@ def _seed_scored(tmp_path, n=25, risk=0.65, prefix="s"):
 
 def _seed_scored_items(n=25, risk=0.65, prefix="s"):
     return [{"segment_id": f"{prefix}{i:04d}" + "0" * 59, "risk": risk,
-              "lang": "hi-IN", "duration_ms": 3000} for i in range(n)]
+             "lang": "hi-IN", "duration_ms": 3000,
+             "tier0_variant": TIER0_VARIANT} for i in range(n)]
 
 
 def test_escalate_without_confirm_refuses_to_spend(tmp_path, capsys):
@@ -100,7 +109,7 @@ def test_budget_failure_leaves_no_table_behind(tmp_path):
         for item in scored:
             store.put_reference(item["segment_id"], "ref text", item["lang"])
             store.put_hypothesis(item["segment_id"], "tier0", "hyp text",
-                                 {}, 0.0, "")
+                                 {}, 0.0, TIER0_VARIANT)
         # Leave zero headroom: any paid call must breach the ceiling.
         store.reserve_spend("tier1", MAX_SPEND_USD)
 
@@ -182,7 +191,7 @@ def test_write_table_gets_marginal_spend_not_cumulative(tmp_path, monkeypatch):
         for item in scored:
             store.put_reference(item["segment_id"], "ref text", item["lang"])
             store.put_hypothesis(item["segment_id"], "tier0", "hyp text",
-                                 {}, 0.0, "")
+                                 {}, 0.0, TIER0_VARIANT)
 
     out = tmp_path / "delta_table.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
@@ -203,3 +212,39 @@ def test_write_table_gets_marginal_spend_not_cumulative(tmp_path, monkeypatch):
         "spend_usd must not equal the store's full cumulative history"
     )
     assert spend < 1.0, "sanity: this run's spend must be nowhere near the unrelated $5 baseline"
+
+
+# --- C1: the CLI must look Tier 0 up under the key collect() actually wrote ---
+
+def test_escalate_finds_tier0_under_the_real_variant_key(tmp_path, monkeypatch):
+    """Regression for C1. The CLI called escalate_selected() without a
+    tier0_variant, so it looked hypotheses up under "" while collect()
+    stored them under Tier0Conformer.variant_key. Every segment therefore
+    hit the "no Tier 0 output" skip, rows was empty, and the CLI wrote
+    {"tier1": {}} and exited 0 — a silently empty calibration.
+
+    Both pre-existing CLI tests seeded Tier 0 under "" and so agreed with
+    the bug. This one seeds under the realistic key and demands rows.
+    """
+    monkeypatch.setattr("dhvani.backends.tier1_chirp.Tier1Chirp", _FakeTier1)
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta gamma", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha beta WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    out = tmp_path / "delta_table.json"
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--out", str(out), "--confirm"])
+    assert rc == 0
+
+    payload = json.loads(out.read_text())
+    assert payload["tier1"], "no bucket measured: every segment was skipped"
+    assert "0.6-0.7" in payload["tier1"]
+    assert payload["meta"]["bucket_n"]["0.6-0.7"] == 25

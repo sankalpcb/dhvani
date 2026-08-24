@@ -89,6 +89,14 @@ def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
                 "risk": compute_risk(features),
                 "lang": lang,
                 "duration_ms": item.duration_ms,
+                # The Tier 0 cache key this hypothesis was stored under.
+                # Persisted rather than re-derived in phase 2: the two
+                # phases are separate processes, possibly days apart, and
+                # reconstructing a backend in the escalate branch to ask
+                # for its variant_key would silently return the WRONG key
+                # after a language or model change between them. Phase 2
+                # must look up what phase 1 actually wrote.
+                "tier0_variant": tier0.variant_key,
             })
 
     return scored
@@ -110,13 +118,22 @@ def escalate_selected(selected, tier1, store, segments_by_id,
     Spend is reserved BEFORE each paid call, and a cached Tier 1 hypothesis
     is reused without reserving again — re-running a calibration pass must
     not re-charge for work already done.
+
+    The Tier 0 cache key is read PER ITEM from the scored record collect()
+    wrote (`tier0_variant`), falling back to the `tier0_variant` argument
+    only for callers that predate that field. A single key for the whole
+    batch cannot be right once collect() runs one backend per language:
+    "lang=hi;model_id=..." and "lang=kn;model_id=..." are different cache
+    entries, and looking either up under the other's key returns None,
+    which this function reads as "no Tier 0 output" and silently skips.
     """
     rows: list[dict] = []
 
     for item in selected:
         segment_id = item["segment_id"]
         reference = store.get_reference(segment_id)
-        tier0 = store.get_hypothesis(segment_id, "tier0", tier0_variant)
+        tier0 = store.get_hypothesis(segment_id, "tier0",
+                                     item.get("tier0_variant", tier0_variant))
         if reference is None or tier0 is None:
             # No ground truth or no Tier 0 output means no meaningful delta.
             continue

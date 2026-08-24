@@ -148,6 +148,7 @@ def test_write_table_records_provenance(tmp_path):
     assert "tier1" in written
     meta = written["meta"]
     assert meta["policy_id"] and meta["risk_weights"]
+    assert meta["segments_selected"] == 25
     assert meta["segments_escalated"] == 25
     assert meta["spend_usd"] == pytest.approx(0.019)
     assert meta["languages"] == ["hi-IN"]
@@ -225,3 +226,18 @@ def test_write_table_refuses_when_no_bucket_clears_the_floor(tmp_path):
     with pytest.raises(NoMeasuredBuckets):
         write_table(rows, _selected(7), str(path), spend_usd=0.0, langs=["hi-IN"])
     assert not path.exists()
+
+
+# --- I8: the two counts must be distinguishable ---
+
+def test_write_table_separates_selected_from_escalated(tmp_path):
+    """meta.segments_escalated was len(selected), so it could read 812
+    beside an empty tier1 map. The gap between the two is the skip count."""
+    rows = [{"risk": 0.65, "reference": "a b c d",
+             "tier0_text": "a b c X", "tier1_text": "a b c d"}] * 21
+    path = tmp_path / "t.json"
+    write_table(rows, _selected(40), str(path), spend_usd=0.0, langs=["hi-IN"])
+
+    meta = json.loads(path.read_text())["meta"]
+    assert meta["segments_selected"] == 40
+    assert meta["segments_escalated"] == 21

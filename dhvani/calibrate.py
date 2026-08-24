@@ -130,7 +130,7 @@ class LazySegments:
                        load_pcm(self._cache_dir, segment_id))
 
 
-def histogram(scored: list[dict]) -> dict:
+def histogram(scored: list[dict]) -> dict[str, int]:
     """Bucket label -> count. Printed before any paid call so the risk
     distribution is visible while it is still free to act on."""
     counts: dict[str, int] = defaultdict(int)
@@ -360,7 +360,12 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
         "dropped_buckets": dropped,
         "min_bucket_samples": MIN_BUCKET_SAMPLES,
         "languages": list(langs),
-        "segments_escalated": len(selected),
+        # I8: this was `segments_escalated: len(selected)`, which counted
+        # what was CHOSEN, not what survived — so it could read 812 beside
+        # an empty tier1 map. The two numbers are now separate, and their
+        # gap is the skip count.
+        "segments_selected": len(selected),
+        "segments_escalated": len(rows),
         "spend_usd": round(spend_usd, 6),
         "measured_at": date.today().isoformat(),
     }

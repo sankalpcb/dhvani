@@ -79,7 +79,7 @@ POLICY_ID, RISK_WEIGHTS
 |---|---|
 | `dhvani/store.py` (modify) | + `references_` table, `put_reference`, `get_reference` |
 | `dhvani/corpus.py` (new) | `CorpusItem`, `FakeCorpus`, `IndicVoicesCorpus` |
-| `dhvani/calibrate.py` (new) | `stratify`, `collect`, `escalate`, `assemble_rows`, `write_table` |
+| `dhvani/calibrate.py` (new) | `stratify`, `collect`, `escalate_selected`, `write_table` (row assembly is inlined in `escalate_selected`) |
 | `dhvani/cli_calibrate.py` (new) | `collect` / `escalate` subcommands, `--dry-run`, `--confirm` |
 | `pyproject.toml` (modify) | + `data` extra, + `dhvani-calibrate` script |
 
@@ -221,6 +221,10 @@ git commit -m "feat: references_ table for calibration ground truth"
   - `CorpusItem` — frozen dataclass: `segment_id: str`, `pcm: np.ndarray`, `reference: str`, `lang: str`, `speaker_id: str`, `district: str`, `duration_ms: int`
   - `FakeCorpus(items: list[tuple])` — `.stream(lang, limit) -> Iterator[CorpusItem]`
   - `IndicVoicesCorpus(dataset_id="ai4bharat/IndicVoices")` — same `.stream` contract
+  - `SCHEMA_PROBE_ROWS = 50` and `_extract_item_from_row(row, lang)` — the fail-loud guard
+    added in review: examining this many rows without producing one item raises, naming the
+    fields expected and the keys actually present, so a wrong schema guess cannot masquerade
+    as an empty corpus
   - `disjoint_by(items, key: str) -> bool` — True when no value of `key` repeats
 
 - [ ] **Step 1: Write the failing test**
@@ -765,7 +769,6 @@ git commit -m "feat: phase 1 collect — resumable local transcription and scori
 - Produces:
   - `estimate_cost(selected: list[dict]) -> float`
   - `escalate_selected(selected, tier1, store, segments_by_id: dict, tier0_variant: str = "") -> list[dict]` — returns rows
-  - `assemble_rows(selected, store, tier1_variant) -> list[dict]`
   - `write_table(rows, selected, path, spend_usd, langs) -> dict`
 
 - [ ] **Step 1: Write the failing test**

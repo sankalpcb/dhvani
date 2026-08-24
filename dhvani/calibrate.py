@@ -9,8 +9,13 @@ ones, because that is the only way to discover the negative deltas that
 invariant I3 exists to filter.
 """
 
+import json
 from collections import defaultdict
+from datetime import date
 
+from dhvani.backends.tier1_chirp import cost_for_duration_ms
+from dhvani.config import POLICY_ID, RISK_WEIGHTS
+from dhvani.delta_table import build as build_delta_table
 from dhvani.router import bucket_of
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import Segment
@@ -87,3 +92,80 @@ def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
             })
 
     return scored
+
+
+def estimate_cost(selected: list[dict]) -> float:
+    """Pre-flight estimate, printed before the first paid call.
+
+    Prices through cost_for_duration_ms — the single Tier 1 cost model — so
+    the estimate cannot drift from what is actually reserved.
+    """
+    return sum(cost_for_duration_ms(s["duration_ms"]) for s in selected)
+
+
+def escalate_selected(selected, tier1, store, segments_by_id,
+                      tier0_variant: str = "") -> list[dict]:
+    """Phase 2: run Tier 1 over the stratified sample and assemble rows.
+
+    Spend is reserved BEFORE each paid call, and a cached Tier 1 hypothesis
+    is reused without reserving again — re-running a calibration pass must
+    not re-charge for work already done.
+    """
+    rows: list[dict] = []
+
+    for item in selected:
+        segment_id = item["segment_id"]
+        reference = store.get_reference(segment_id)
+        tier0 = store.get_hypothesis(segment_id, "tier0", tier0_variant)
+        if reference is None or tier0 is None:
+            # No ground truth or no Tier 0 output means no meaningful delta.
+            continue
+
+        cached = store.get_hypothesis(segment_id, "tier1", tier1.variant_key)
+        if cached is None:
+            segment = segments_by_id[segment_id]
+            cost = tier1.cost_per_call(segment)
+            store.reserve_spend(tier1.name, cost)
+            result = tier1.transcribe(segment)
+            store.put_hypothesis(segment_id, "tier1", result["text"],
+                                 result.get("signals", {}), cost, tier1.variant_key)
+            tier1_text = result["text"]
+        else:
+            tier1_text = cached["text"]
+
+        rows.append({
+            "risk": item["risk"],
+            "reference": reference["reference"],
+            "tier0_text": tier0["text"],
+            "tier1_text": tier1_text,
+        })
+
+    return rows
+
+
+def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
+    """Build the delta table and write it with provenance.
+
+    build()'s contract is untouched; meta is additive. Nothing enforces meta
+    (spec non-goal N3), but a stale table becomes visible rather than silent.
+    """
+    table = build_delta_table(rows)
+
+    bucket_n: dict[str, int] = defaultdict(int)
+    for row in rows:
+        bucket_n[bucket_of(row["risk"])] += 1
+
+    payload = dict(table)
+    payload["meta"] = {
+        "policy_id": POLICY_ID,
+        "risk_weights": dict(RISK_WEIGHTS),
+        "bucket_n": dict(sorted(bucket_n.items())),
+        "languages": list(langs),
+        "segments_escalated": len(selected),
+        "spend_usd": round(spend_usd, 6),
+        "measured_at": date.today().isoformat(),
+    }
+
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    return table

@@ -75,6 +75,42 @@ def test_cli_replay_mode_runs_end_to_end_without_torch(tmp_path, capsys):
     assert all(entry["band"] in {"ship", "marked", "review"} for entry in track)
 
 
+def test_cli_emits_metrics_summary_on_stderr_and_leaves_stdout_alone(tmp_path, capsys):
+    """I7: the CLI must surface timing metrics, but ONLY on stderr -- stdout
+    carries the caption track JSON and --out asserts it matches stdout
+    byte-for-byte, so metrics leaking onto stdout would break that."""
+    wav_path = tmp_path / "clip.wav"
+    _write_wav(wav_path)
+
+    samples, rate = sf.read(str(wav_path))
+    pcm = normalize(samples, rate)
+    segments = split(pcm)
+
+    fixtures_dir = tmp_path / "fixtures"
+    tier0_dir = (fixtures_dir / "tier0"
+                 / variant_slug(Tier0Conformer(lang="hi").variant_key))
+    tier0_dir.mkdir(parents=True)
+    for seg in segments:
+        (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": "नमस्ते world",
+            "signals": {"ctc_rnnt_disagreement": 0.1},
+        }))
+
+    exit_code = main([
+        str(wav_path),
+        "--db", str(tmp_path / "t.db"),
+        "--mode", "replay",
+        "--fixtures", str(fixtures_dir),
+        "--delta-table", str(tmp_path / "no-such-delta-table.json"),
+    ])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    track = json.loads(captured.out)
+    assert len(track) == len(segments)
+    assert "tier0" in captured.err
+
+
 def test_cli_help_runs_without_error():
     """Sanity check: --help must exit 0 and never construct a backend."""
     try:

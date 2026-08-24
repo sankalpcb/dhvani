@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dhvani.config import TAU_FLAG, TAU_SHIP
+from dhvani.metrics import Timer
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import segment as split
 
@@ -29,8 +30,14 @@ def band_of(risk: float) -> str:
 
 
 def run(pcm: np.ndarray, source_id: str, tier0, store,
-        delta_table: dict, budget_usd: float) -> list[TrackEntry]:
+        delta_table: dict, budget_usd: float,
+        samples: dict | None = None) -> list[TrackEntry]:
     """Produce a caption track. Cached segments are never re-transcribed.
+
+    samples, when given, collects Tier 0 transcription wall-clock timings
+    (spec §9.1) into samples["tier0"], one entry per actual backend call
+    (cache hits are not timed -- they are not the work being measured).
+    Callers that pass nothing get exactly today's behavior.
 
     delta_table and budget_usd are accepted for interface stability but are
     unused in Phase 1: escalation is computed offline by report.frontier()
@@ -56,7 +63,10 @@ def run(pcm: np.ndarray, source_id: str, tier0, store,
         variant = tier0.variant_key
         cached = store.get_hypothesis(seg.segment_id, "tier0", variant_key=variant)
         if cached is None:
-            result = tier0.transcribe(seg)
+            with Timer() as t:
+                result = tier0.transcribe(seg)
+            if samples is not None:
+                samples.setdefault("tier0", []).append(t.elapsed_ms)
             store.put_hypothesis(
                 seg.segment_id, "tier0", result["text"],
                 result["signals"], tier0.cost_per_call(seg),

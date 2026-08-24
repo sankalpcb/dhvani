@@ -16,6 +16,7 @@ an input; the same payload still goes to stdout.
 import argparse
 import json
 import os
+import sys
 
 import soundfile as sf
 
@@ -23,6 +24,7 @@ from dhvani.audio import normalize
 from dhvani.backends.base import Recorded
 from dhvani.backends.tier0_conformer import Tier0Conformer
 from dhvani.config import POLICY_ID
+from dhvani.metrics import summarize
 from dhvani.pipeline import run
 from dhvani.segmenter import segment as split
 from dhvani.store import Store
@@ -60,12 +62,14 @@ def main(argv=None) -> int:
         with open(args.delta_table) as fh:
             delta_table = json.load(fh)
 
+    samples: dict = {}
+
     with Store(args.db) as store:
         tier0 = Recorded(
             Tier0Conformer(lang=args.lang), args.mode, args.fixtures, store
         )
         entries = run(pcm, os.path.basename(args.audio), tier0, store,
-                      delta_table, args.budget)
+                      delta_table, args.budget, samples=samples)
 
         if args.escalate or args.reconcile:
             from dhvani.backends.async_base import SyncAsyncAdapter
@@ -111,7 +115,7 @@ def main(argv=None) -> int:
                     if len(job_segments) != len(job["segment_ids"]):
                         continue
                     tier1.adopt(job["job_id"], job_segments)
-                do_reconcile(source, tier1, store)
+                do_reconcile(source, tier1, store, samples=samples)
 
     payload = json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2)
 
@@ -123,6 +127,11 @@ def main(argv=None) -> int:
             fh.write(payload)
 
     print(payload)
+
+    # Metrics go to stderr, never stdout: stdout is the caption track JSON
+    # and --out asserts it matches stdout byte-for-byte (see the docstring
+    # above), so anything printed here must not touch it.
+    print(json.dumps(summarize(samples), ensure_ascii=False), file=sys.stderr)
     return 0
 
 

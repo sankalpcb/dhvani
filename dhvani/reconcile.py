@@ -26,6 +26,7 @@ violation this module exists to prevent.
 """
 
 from dhvani.config import POLICY_ID
+from dhvani.metrics import Timer
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.track import entries_from_json, entries_to_json, merge_entries
 
@@ -42,8 +43,14 @@ from dhvani.track import entries_from_json, entries_to_json, merge_entries
 MAX_JOB_ATTEMPTS = 5
 
 
-def reconcile(source_id: str, backend, store) -> int:
-    """Merge any completed jobs for this backend. Returns the latest version."""
+def reconcile(source_id: str, backend, store,
+              samples: dict | None = None) -> int:
+    """Merge any completed jobs for this backend. Returns the latest version.
+
+    samples, when given, collects each job's poll() wall-clock timing
+    (spec §9.1) into samples["tier1_poll"]. Callers that pass nothing get
+    exactly today's behavior.
+    """
     version = store.latest_track_version(source_id)
     if version == 0:
         return 0
@@ -70,7 +77,10 @@ def reconcile(source_id: str, backend, store) -> int:
         # starve the rest of the queue forever. Catch it, retry-or-
         # dead-letter this one job, and move on.
         try:
-            results = backend.poll(job["job_id"])
+            with Timer() as t:
+                results = backend.poll(job["job_id"])
+            if samples is not None:
+                samples.setdefault("tier1_poll", []).append(t.elapsed_ms)
         except Exception:
             store.set_job_state(
                 job["job_id"],

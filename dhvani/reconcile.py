@@ -40,6 +40,13 @@ from dhvani.track import entries_from_json, entries_to_json, merge_entries
 # low-sorting stuck job would be polled first on every single pass forever
 # -- an unguarded exception from its poll() would abandon the whole
 # reconcile() pass, starving every other job on the backend indefinitely.
+#
+# MAX_JOB_ATTEMPTS bounds *failures*, not polls: a poll() that returns None
+# (the job is still legitimately pending) must never bump the attempt
+# counter, or ordinary startup/turnaround latency alone -- no failure at
+# all -- would exhaust the budget and dead-letter a job that was always
+# going to succeed. Only a raising poll() or an incomplete (partial)
+# result counts as an attempt.
 MAX_JOB_ATTEMPTS = 5
 
 
@@ -68,8 +75,6 @@ def reconcile(source_id: str, backend, store,
         if job["tier"] != backend.name or job["variant_key"] != backend.variant_key:
             continue
 
-        attempts = store.bump_job_attempts(job["job_id"])
-
         # Per-job isolation: a raising poll() (TransientError, JobNotFound,
         # ...) must not abort this whole pass -- that would abandon every
         # other job in this loop, and since open_jobs() is ORDER BY
@@ -82,6 +87,8 @@ def reconcile(source_id: str, backend, store,
             if samples is not None:
                 samples.setdefault("tier1_poll", []).append(t.elapsed_ms)
         except Exception:
+            # A raising poll() is a genuine failure -- count it.
+            attempts = store.bump_job_attempts(job["job_id"])
             store.set_job_state(
                 job["job_id"],
                 "failed" if attempts > MAX_JOB_ATTEMPTS else "running",
@@ -89,6 +96,10 @@ def reconcile(source_id: str, backend, store,
             continue
 
         if results is None:
+            # Still pending, not failing -- do NOT bump attempts here.
+            # MAX_JOB_ATTEMPTS bounds failures, so pending latency (a
+            # backend that just takes a while to become ready) must not
+            # be able to consume the dead-letter budget on its own.
             store.set_job_state(job["job_id"], "running")
             continue
 
@@ -108,12 +119,14 @@ def reconcile(source_id: str, backend, store,
             settled.append(job["job_id"])
         else:
             # Partial delivery: some registered segment_ids did not come
-            # back in this batch. Leave the job running so open_jobs()
-            # still returns it and a later pass retries the missing ones
-            # -- unless this has now happened more than MAX_JOB_ATTEMPTS
-            # times, in which case the delivery is persistently incomplete
-            # rather than transient, and the job is dead-lettered instead
-            # of retried forever.
+            # back in this batch. That is a real (if partial) result, not
+            # mere pending latency, so it counts as an attempt. Leave the
+            # job running so open_jobs() still returns it and a later pass
+            # retries the missing ones -- unless this has now happened
+            # more than MAX_JOB_ATTEMPTS times, in which case the delivery
+            # is persistently incomplete rather than transient, and the
+            # job is dead-lettered instead of retried forever.
+            attempts = store.bump_job_attempts(job["job_id"])
             store.set_job_state(
                 job["job_id"],
                 "failed" if attempts > MAX_JOB_ATTEMPTS else "running",

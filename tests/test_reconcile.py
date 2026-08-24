@@ -383,6 +383,96 @@ class AlwaysRaisingBackend:
         raise RuntimeError("injected permanent poll failure")
 
 
+def test_pending_polls_do_not_burn_the_dead_letter_budget(store):
+    """A pending poll (backend.poll() returns None) must not count toward
+    MAX_JOB_ATTEMPTS: the job has not failed at anything, it just isn't
+    ready yet. Before the fix, bump_job_attempts() was called on every
+    single pass regardless of what poll() returned, so a backend with
+    startup latency alone (never once failing or delivering incomplete
+    results) could exceed MAX_JOB_ATTEMPTS and be dead-lettered purely
+    from waiting. Six pending polls, one more than MAX_JOB_ATTEMPTS (5),
+    followed by a complete delivery, must still reach "done" with attempts
+    that never exceeded MAX_JOB_ATTEMPTS.
+    """
+    _seed_v1(store)
+    backend = SyncAsyncAdapter(StubSync(), pending_polls=MAX_JOB_ATTEMPTS + 1)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+
+    max_attempts_seen = 0
+    for _ in range(MAX_JOB_ATTEMPTS + 2):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        max_attempts_seen = max(max_attempts_seen, job["attempts"])
+        assert job["state"] != "failed"
+
+    job = store.get_job(job_id)
+    assert job["state"] == "done"
+    assert max_attempts_seen <= MAX_JOB_ATTEMPTS
+
+
+def test_pending_polls_then_a_partial_delivery_still_converges(store):
+    """The exact reproduction: a backend that takes several polls to become
+    ready and then delivers one partial batch must not be dead-lettered on
+    that first partial delivery. Only a poll that actually fails (raises,
+    or delivers an incomplete result) should count against
+    MAX_JOB_ATTEMPTS -- pending polls are free. pending_polls=6 plus a
+    partial-then-complete delivery pattern (mirroring ChaosBackend's
+    "partial" fault: truncate on the first real delivery, full set after)
+    must still converge to "done" with every segment escalated.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync(), pending_polls=6)
+    batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
+    job_id = inner.submit(batch)
+    store.put_job(job_id, inner.name, inner.variant_key,
+                  [s.segment_id for s in batch], "vid1")
+
+    backend = PartialThenCompleteBackend(inner)
+
+    for _ in range(15):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        if job["state"] == "done":
+            break
+        assert job["state"] != "failed"
+
+    job = store.get_job(job_id)
+    assert job["state"] == "done"
+    version = store.latest_track_version("vid1")
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    assert [e.text for e in merged] == ["escalated", "escalated"]
+
+
+class PartialThenCompleteBackend:
+    """Like PartialDeliveryBackend, but heals after its first real
+    (non-None) delivery -- mirrors ChaosBackend's "partial" fault (Fix
+    round 1): a batch that comes back incomplete once and completes on
+    retry, not a permanently broken job.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+        self._delivered = set()
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        results = self.inner.poll(job_id)
+        if results is None:
+            return None
+        if job_id in self._delivered:
+            return results
+        self._delivered.add(job_id)
+        keys = list(results.keys())[:1]
+        return {k: results[k] for k in keys}
+
+
 def test_a_permanently_failing_job_is_dead_lettered_after_max_attempts(store):
     """After MAX_JOB_ATTEMPTS failed attempts, bump_job_attempts()'s return
     value -- previously discarded entirely -- must be used to dead-letter

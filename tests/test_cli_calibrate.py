@@ -134,6 +134,7 @@ def test_budget_failure_leaves_no_table_behind(tmp_path):
         main(["escalate", "--db", db,
               "--scored-in", str(scored_path),
               "--pcm-cache", _seed_pcm(tmp_path, scored),
+              "--mode", "live",
               "--out", str(out), "--confirm"])
     assert not out.exists()
 
@@ -213,6 +214,7 @@ def test_write_table_gets_marginal_spend_not_cumulative(tmp_path, monkeypatch):
     out = tmp_path / "delta_table.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
                "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--mode", "live",
                "--out", str(out), "--confirm"])
     assert rc == 0
 
@@ -260,6 +262,7 @@ def test_escalate_finds_tier0_under_the_real_variant_key(tmp_path, monkeypatch):
     out = tmp_path / "delta_table.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
                "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--mode", "live",
                "--out", str(out), "--confirm"])
     assert rc == 0
 
@@ -312,6 +315,7 @@ def test_escalate_sends_real_audio_from_the_pcm_cache(tmp_path, monkeypatch):
 
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
                "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--mode", "live",
                "--out", str(tmp_path / "d.json"), "--confirm"])
     assert rc == 0
 
@@ -342,6 +346,7 @@ def test_escalate_fails_loudly_when_pcm_is_not_cached(tmp_path, monkeypatch, cap
     out = tmp_path / "d.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
                "--pcm-cache", str(tmp_path / "empty-cache"),
+               "--mode", "live",
                "--out", str(out), "--confirm"])
 
     assert rc != 0, "a missing PCM cache must not exit 0"
@@ -350,3 +355,77 @@ def test_escalate_fails_loudly_when_pcm_is_not_cached(tmp_path, monkeypatch, cap
     assert "empty-cache" in err, "must name the expected path"
     assert not out.exists()
     assert _RecordingTier1.seen == [], "must not transcribe anything"
+
+
+# --- I5: escalate must be runnable in replay mode ---
+
+def test_escalate_replay_mode_runs_without_credentials_or_spend(tmp_path, capsys):
+    """I5: escalate hardcoded mode="live", so the spec's replay-mode matrix
+    was unreachable and no calibration run was reproducible.
+
+    Nothing here is monkeypatched: this drives the real Tier1Chirp through
+    the real Recorded wrapper. This environment has no google-cloud-speech
+    installed, so any live call would raise ModuleNotFoundError out of
+    _default_client() -- passing is therefore real evidence that replay
+    never reached the backend, not a simulation of it.
+    """
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+    from dhvani.ids import variant_slug
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta gamma", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha beta WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    # Ask the backend the CLI will build where its fixtures live rather than
+    # hardcoding the layout -- they are keyed by tier, variant AND POLICY_ID.
+    fixtures = tmp_path / "fixtures"
+    fixture_dir = fixtures / "tier1" / variant_slug(Tier1Chirp().variant_key)
+    fixture_dir.mkdir(parents=True)
+    for item in scored:
+        (fixture_dir / f"{item['segment_id']}.json").write_text(
+            json.dumps({"text": "alpha beta gamma", "signals": {}}))
+
+    out = tmp_path / "delta_table.json"
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--mode", "replay", "--fixtures", str(fixtures),
+               "--out", str(out), "--confirm"])
+    assert rc == 0
+
+    payload = json.loads(out.read_text())
+    assert payload["tier1"]["0.6-0.7"] > 0.0, (
+        "the fixture transcript is perfect and Tier 0's is not, so the "
+        "measured delta must be positive"
+    )
+    assert payload["meta"]["spend_usd"] == pytest.approx(0.0), (
+        "replay makes no paid call and must reserve nothing"
+    )
+    with Store(db) as store:
+        assert store.total_spend() == 0.0
+
+
+def test_escalate_defaults_to_replay(tmp_path, capsys):
+    """The default must be the mode that cannot spend money."""
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    from dhvani.backends.base import FixtureMissing
+    with pytest.raises(FixtureMissing):
+        main(["escalate", "--db", db, "--scored-in", str(scored_path),
+              "--pcm-cache", _seed_pcm(tmp_path, scored),
+              "--fixtures", str(tmp_path / "no-fixtures"),
+              "--out", str(tmp_path / "d.json"), "--confirm"])

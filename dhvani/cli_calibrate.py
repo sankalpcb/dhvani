@@ -12,6 +12,7 @@ module level.
 
 import argparse
 import json
+import os
 import sys
 
 from dhvani.calibrate import (
@@ -69,6 +70,16 @@ def main(argv=None) -> int:
     e.add_argument("--pcm-cache", default=DEFAULT_PCM_CACHE,
                    help="directory phase 1 wrote segment PCM to; Tier 1 is sent "
                         "this audio inline, so it must be the same directory")
+    # I5: escalate used to hardcode mode="live" and fixtures="fixtures",
+    # so the spec's replay-mode test matrix was unreachable from the CLI and
+    # no calibration run was reproducible without credentials and a bill.
+    # Same shape as dhvani/cli.py, including the replay default: a command
+    # that spends money must be asked for explicitly.
+    e.add_argument("--mode", default=os.environ.get("DHVANI_MODE", "replay"),
+                   choices=["replay", "record", "live"],
+                   help="replay reads fixtures and never calls out; record "
+                        "calls live and saves the response; live just calls")
+    e.add_argument("--fixtures", default="fixtures")
     e.add_argument("--dry-run", action="store_true",
                    help="stratify, print the estimate, and exit without spending")
     e.add_argument("--confirm", action="store_true",
@@ -132,7 +143,7 @@ def main(argv=None) -> int:
     try:
         with Store(args.db) as store:
             before = store.total_spend()
-            tier1 = Recorded(Tier1Chirp(), "live", "fixtures", store)
+            tier1 = Recorded(Tier1Chirp(), args.mode, args.fixtures, store)
             rows = escalate_selected(selected, tier1, store, segments)
             spent = store.total_spend() - before
     except PcmCacheMiss as exc:

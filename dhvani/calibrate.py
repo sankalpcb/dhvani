@@ -12,6 +12,8 @@ invariant I3 exists to filter.
 from collections import defaultdict
 
 from dhvani.router import bucket_of
+from dhvani.scorer import extract, risk as compute_risk
+from dhvani.segmenter import Segment
 
 # A bucket with fewer samples than this is OMITTED from the table rather
 # than included with a noisy average. Omission degrades to "do not
@@ -48,3 +50,40 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
         members.sort(key=lambda i: i["segment_id"])
         chosen.extend(members[:n_per_bucket])
     return chosen
+
+
+def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
+    """Phase 1: transcribe and score a corpus locally. Slow, free, resumable.
+
+    One utterance is one segment (spec §1.2), so the segmenter is bypassed
+    and every segment keeps its own reference. Already-transcribed segments
+    are read from the store rather than re-run — that is what lets a
+    multi-hour run be killed and restarted without losing work.
+    """
+    scored: list[dict] = []
+
+    for lang in langs:
+        for item in corpus.stream(lang, limit=per_lang):
+            store.put_segment(item.segment_id, f"calib:{lang}", 0,
+                              item.duration_ms, lang)
+            store.put_reference(item.segment_id, item.reference, lang,
+                                item.speaker_id, item.district)
+
+            cached = store.get_hypothesis(item.segment_id, "tier0", tier0.variant_key)
+            if cached is None:
+                segment = Segment(item.segment_id, 0, item.duration_ms, item.pcm)
+                result = tier0.transcribe(segment)
+                store.put_hypothesis(item.segment_id, "tier0", result["text"],
+                                     result["signals"], 0.0, tier0.variant_key)
+            else:
+                result = {"text": cached["text"], "signals": cached["signals"]}
+
+            features = extract(result["text"], result["signals"], item.duration_ms)
+            scored.append({
+                "segment_id": item.segment_id,
+                "risk": compute_risk(features),
+                "lang": lang,
+                "duration_ms": item.duration_ms,
+            })
+
+    return scored

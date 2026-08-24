@@ -379,18 +379,25 @@ def test_escalate_fails_loudly_when_pcm_is_not_cached(tmp_path, monkeypatch, cap
 
 # --- I5: escalate must be runnable in replay mode ---
 
-def test_escalate_replay_mode_runs_without_credentials_or_spend(tmp_path, capsys):
+def test_escalate_replay_mode_runs_without_credentials_or_spend(tmp_path, monkeypatch):
     """I5: escalate hardcoded mode="live", so the spec's replay-mode matrix
     was unreachable and no calibration run was reproducible.
 
-    Nothing here is monkeypatched: this drives the real Tier1Chirp through
-    the real Recorded wrapper. This environment has no google-cloud-speech
-    installed, so any live call would raise ModuleNotFoundError out of
-    _default_client() -- passing is therefore real evidence that replay
-    never reached the backend, not a simulation of it.
+    The backend is the real Tier1Chirp behind the real Recorded wrapper --
+    no stub is substituted. Only the lazy client factory is replaced, with
+    a tripwire that fails the test if it is ever called. google-cloud-speech
+    IS installed in this venv (the `cloud` extra), so "the import would have
+    failed anyway" is not available as evidence here; the tripwire proves
+    the replay path never reached the backend regardless of what is
+    installed.
     """
     from dhvani.backends.tier1_chirp import Tier1Chirp
     from dhvani.ids import variant_slug
+
+    def _tripwire(recognizer=""):
+        raise AssertionError("replay mode reached the live Chirp backend")
+
+    monkeypatch.setattr("dhvani.backends.tier1_chirp._default_client", _tripwire)
 
     db = str(tmp_path / "t.db")
     scored = _seed_scored_items(n=25)

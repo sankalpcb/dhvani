@@ -186,7 +186,15 @@ class _FakeTier1:
     up the replacement at call time."""
 
     name = "tier1"
-    variant_key = "fake"
+
+    def __init__(self, lang="hi-IN", **kwargs):
+        # I6: the CLI now builds one backend per language, so a stub must
+        # accept the language the way Tier1Chirp does.
+        self.lang = lang
+
+    @property
+    def variant_key(self):
+        return f"fake;lang={self.lang}"
 
     def cost_per_call(self, segment):
         return 0.01
@@ -429,3 +437,47 @@ def test_escalate_defaults_to_replay(tmp_path, capsys):
               "--pcm-cache", _seed_pcm(tmp_path, scored),
               "--fixtures", str(tmp_path / "no-fixtures"),
               "--out", str(tmp_path / "d.json"), "--confirm"])
+
+
+# --- I6: Tier 1 must also be configured per language ---
+
+def test_escalate_builds_one_tier1_per_language(tmp_path, monkeypatch):
+    """The CLI built one Tier1Chirp() -- default lang="hi-IN" -- for the
+    whole selection, so Kannada and Malayalam segments were sent to Chirp
+    as Hindi and shared one variant_key."""
+    _RecordingTier1.seen = []
+    built = []
+
+    class _Tracking(_RecordingTier1):
+        def __init__(self, lang="hi-IN", **kwargs):
+            super().__init__(lang=lang, **kwargs)
+            built.append(lang)
+
+    monkeypatch.setattr("dhvani.backends.tier1_chirp.Tier1Chirp", _Tracking)
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25, prefix="hi") + \
+        _seed_scored_items(n=25, prefix="kn")
+    for item in scored[25:]:
+        item["lang"] = "kn-IN"
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    out = tmp_path / "d.json"
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--mode", "live",
+               "--out", str(out), "--confirm"])
+    assert rc == 0
+
+    assert sorted(built) == ["hi-IN", "kn-IN"], (
+        "one Tier 1 backend per language, each carrying that language"
+    )
+    assert len(_RecordingTier1.seen) == 50, "every segment must still be sent"
+    assert json.loads(out.read_text())["meta"]["languages"] == ["hi-IN", "kn-IN"]

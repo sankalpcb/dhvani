@@ -93,8 +93,16 @@ def main(argv=None) -> int:
 
         corpus = IndicVoicesCorpus()
         with Store(args.db) as store:
-            scored = collect(corpus, Tier0Conformer(), store, args.langs,
-                             args.per_lang, args.pcm_cache)
+            # I6: ONE BACKEND PER LANGUAGE. A single Tier0Conformer() takes
+            # the default lang="hi", so reusing it across --langs decoded
+            # Kannada and Malayalam audio as Hindi and gave all three runs
+            # the same variant_key, collapsing them onto one cache entry.
+            # Tier0Conformer speaks the bare code ("hi"), the corpus and the
+            # scored records speak the full tag ("hi-IN") -- same split the
+            # corpus loader does to pick its config.
+            scored = collect(corpus,
+                             lambda lang: Tier0Conformer(lang=lang.split("-")[0]),
+                             store, args.langs, args.per_lang, args.pcm_cache)
         _print_histogram(scored)
         with open(args.scored_out, "w", encoding="utf-8") as fh:
             json.dump(scored, fh, indent=2)
@@ -139,12 +147,22 @@ def main(argv=None) -> int:
     # bytes of silence for every selected segment and produced a uniformly
     # wrong table that still looked plausible.
     segments = LazySegments(selected, args.pcm_cache)
+    langs = sorted({s["lang"] for s in selected})
 
     try:
         with Store(args.db) as store:
             before = store.total_spend()
-            tier1 = Recorded(Tier1Chirp(), args.mode, args.fixtures, store)
-            rows = escalate_selected(selected, tier1, store, segments)
+            rows = []
+            # I6, Tier 1 half: Tier1Chirp() also defaults to lang="hi-IN",
+            # so one instance shared across the corpus asked Chirp to
+            # transcribe Kannada and Malayalam as Hindi. dhvani/cli.py
+            # already builds Tier1Chirp(lang=...) per run; this is the same
+            # shape, once per language present in the selection.
+            for lang in langs:
+                subset = [s for s in selected if s["lang"] == lang]
+                tier1 = Recorded(Tier1Chirp(lang=lang), args.mode,
+                                 args.fixtures, store)
+                rows.extend(escalate_selected(subset, tier1, store, segments))
             spent = store.total_spend() - before
     except PcmCacheMiss as exc:
         print(str(exc), file=sys.stderr)
@@ -158,7 +176,6 @@ def main(argv=None) -> int:
     print(f"skipped {skipped} of {len(selected)} selected segments "
           f"(no reference or Tier 0 hypothesis)", file=sys.stderr)
 
-    langs = sorted({s["lang"] for s in selected})
     write_table(rows, selected, args.out, spent, langs)
     print(f"wrote {args.out} from {len(rows)} rows; spent ${spent:.4f}", file=sys.stderr)
     return 0

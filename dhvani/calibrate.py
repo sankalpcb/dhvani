@@ -147,7 +147,7 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
     return chosen
 
 
-def collect(corpus, tier0, store, langs, per_lang: int,
+def collect(corpus, make_tier0, store, langs, per_lang: int,
             pcm_cache_dir: str) -> list[dict]:
     """Phase 1: transcribe and score a corpus locally. Slow, free, resumable.
 
@@ -155,6 +155,14 @@ def collect(corpus, tier0, store, langs, per_lang: int,
     and every segment keeps its own reference. Already-transcribed segments
     are read from the store rather than re-run — that is what lets a
     multi-hour run be killed and restarted without losing work.
+
+    I6: `make_tier0` is a factory taking a language code, NOT a single
+    backend instance. It used to be one instance, built once by the CLI
+    with Tier0Conformer's default lang="hi" and then reused for every
+    language in `langs` — so Kannada and Malayalam audio was decoded as
+    Hindi (two thirds of the corpus scored on garbage), and because
+    variant_key was identical across languages the store could not even
+    tell the three runs apart.
 
     pcm_cache_dir is required, not optional: phase 2 has no other source for
     the audio (see DEFAULT_PCM_CACHE), so a collect run that quietly skipped
@@ -164,6 +172,7 @@ def collect(corpus, tier0, store, langs, per_lang: int,
     seen: set[str] = set()
 
     for lang in langs:
+        tier0 = make_tier0(lang)
         for item in corpus.stream(lang, limit=per_lang):
             save_pcm(pcm_cache_dir, item.segment_id, item.pcm)
 

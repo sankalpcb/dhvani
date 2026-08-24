@@ -25,21 +25,25 @@ def merge_entries(base: list[TrackEntry], updates: dict) -> list[TrackEntry]:
     updates maps segment_id -> {"text": str, "risk": float}. The band is
     recomputed from the new risk rather than carried over, so an escalated
     segment can move out of the review band.
-    """
-    by_id = {e.segment_id: e for e in base}
 
-    for segment_id, upd in updates.items():
-        current = by_id.get(segment_id)
-        if current is None:
-            # A result for a segment this track does not contain. Ignoring it
-            # protects I1: the merge can never grow the track.
+    base is not keyed by segment_id: byte-identical audio chunks legitimately
+    share an id (segment_id is a hash of the pcm alone), so every entry whose
+    segment_id appears in updates is replaced in place, preserving each
+    entry's own timestamps. Output length is always len(base); an update
+    naming a segment_id absent from base is ignored, never inserted.
+    """
+    merged = []
+    for entry in base:
+        upd = updates.get(entry.segment_id)
+        if upd is None:
+            merged.append(entry)
             continue
         risk = float(upd["risk"])
-        by_id[segment_id] = replace(
-            current, text=upd["text"], risk=risk, band=band_of(risk)
+        merged.append(
+            replace(entry, text=upd["text"], risk=risk, band=band_of(risk))
         )
 
-    return sorted(by_id.values(), key=lambda e: (e.t_start_ms, e.segment_id))
+    return sorted(merged, key=lambda e: (e.t_start_ms, e.segment_id))
 
 
 def entries_to_json(entries: list[TrackEntry]) -> str:

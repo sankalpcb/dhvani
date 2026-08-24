@@ -68,3 +68,38 @@ def test_json_round_trip():
 def test_json_is_stable_for_equal_input():
     """Invariant I5: same entries -> byte-identical payload."""
     assert entries_to_json(_base()) == entries_to_json(list(reversed(_base())))
+
+
+def test_merge_preserves_duplicate_segment_ids():
+    """Invariant I1/I4: byte-identical audio chunks can share a segment_id.
+
+    merge_entries must not collapse them into one entry keyed by id -- every
+    entry whose segment_id appears in updates gets replaced, in place, with
+    its own distinct timestamp preserved.
+    """
+    dup_id = "c" * 64
+    base = [
+        TrackEntry(dup_id, 0, 3000, "one", 0.9, "review"),
+        TrackEntry(dup_id, 3000, 6000, "one", 0.9, "review"),
+        TrackEntry("d" * 64, 6000, 9000, "three", 0.2, "ship"),
+    ]
+    out = merge_entries(base, {dup_id: {"text": "fixed", "risk": 0.1}})
+
+    assert len(out) == 3
+    dup_entries = [e for e in out if e.segment_id == dup_id]
+    assert len(dup_entries) == 2
+    assert {e.t_start_ms for e in dup_entries} == {0, 3000}
+    assert all(e.text == "fixed" and e.band == "ship" for e in dup_entries)
+
+
+def test_merge_tie_breaks_by_segment_id_when_t_start_ms_equal():
+    """Two entries sharing t_start_ms sort deterministically by segment_id,
+    regardless of the input order."""
+    e1 = TrackEntry("b" * 64, 0, 3000, "one", 0.9, "review")
+    e2 = TrackEntry("a" * 64, 0, 3000, "two", 0.5, "marked")
+
+    forward = merge_entries([e1, e2], {})
+    backward = merge_entries([e2, e1], {})
+
+    assert [e.segment_id for e in forward] == ["a" * 64, "b" * 64]
+    assert forward == backward

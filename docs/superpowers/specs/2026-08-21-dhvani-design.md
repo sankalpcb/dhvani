@@ -484,7 +484,7 @@ M4 is the differentiating milestone. If time runs short, cut M5 before M4.
 
 | Risk | Mitigation |
 |---|---|
-| IndicConformer does not expose both CTC and RNNT heads | Day-one spike. If absent, re-fit weights without that feature; document the loss. |
+| ~~IndicConformer does not expose both CTC and RNNT heads~~ | **CLOSED 2026-08-24 — both heads confirmed exposed.** See §14.1. |
 | Chirp 3 lacks dynamic-batch support | Day-one spike. Fallback: standard tier, ~$14.40, still inside budget. |
 | Chirp outperforms the cascade at every budget point | This is a legitimate finding, not a failure. Report it honestly; the systems contribution (dedup, reconciliation, chaos suite) stands independently. |
 | Scope creep into ML | Non-goal N1 is binding. No training loops. |
@@ -512,3 +512,31 @@ M4 is the differentiating milestone. If time runs short, cut M5 before M4.
 - Chirp 3 `ml-IN` code-mixing defect report:
   https://discuss.google.dev/t/chirp-3-ml-in-unpredictable-code-mixing-english-words-transliterated-to-malayalam-script-and-vice-versa/388859
 - Google Cloud Speech-to-Text v2 pricing (dynamic batch tier)
+
+### 14.1 Spike 1 result — CLOSED (2026-08-24)
+
+`ai4bharat/indic-conformer-600m-multilingual` **does expose both decoder heads.** Verified on
+the real model after HuggingFace access was granted and authenticated:
+
+| Input (1s @ 16kHz) | CTC | RNNT | `disagreement` |
+|---|---|---|---|
+| digital silence | `'ह'` | `''` | **1.000** |
+| 440 Hz tone | `''` | `''` | 0.000 |
+| white noise | `''` | `''` | 0.000 |
+| frequency sweep | `'जी'` | `'जी'` | 0.000 |
+
+Consequences:
+
+- **`ctc_rnnt_disagreement` is viable.** `RISK_WEIGHTS` stands as-is; no refit is needed, and
+  its 0.4667 weight remains the heaviest live signal.
+- The assumed calling convention `model(wav, lang, decoding)` is correct.
+- **CTC hallucinates on silence while RNNT stays empty**, so the two heads disagree maximally
+  exactly where the model is least trustworthy. That is the signal behaving as intended, but it
+  also means near-silent segments will score high risk — worth watching on real data, since a
+  quiet segment is cheap to escalate and may not benefit from it.
+- **`onnxruntime` is a hard requirement** of the model's `trust_remote_code` modeling file and
+  was missing from the `models` extra. Now declared.
+- The model emits `Please check FRAME_DURATION_MS. The timestamps can be inaccurate` on load.
+  Harmless for our use (we supply our own segment boundaries), but noted.
+
+Spike 2 (Chirp 3 dynamic batching) remains **OPEN** pending GCP credentials.

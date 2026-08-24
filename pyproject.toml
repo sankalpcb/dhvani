@@ -16,7 +16,7 @@ dhvani-bench = "dhvani.report_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-models = ["torch>=2.2", "transformers>=4.40"]
+models = ["torch>=2.2", "transformers>=4.40", "onnxruntime>=1.17"]
 cloud = ["google-cloud-speech>=2.26"]
 
 [tool.pytest.ini_options]

@@ -98,6 +98,19 @@ def main(argv=None) -> int:
                 do_escalate(source, entries, segments, tier1, store,
                             delta_table, args.budget)
             if args.reconcile:
+                # tier1's _jobs is in-memory and starts empty in a process
+                # that did not also --escalate; jobs rows in the Store are
+                # durable, so poll() would raise JobNotFound for a job that
+                # is genuinely still outstanding. adopt() rebuilds it from
+                # the durable record before reconcile() polls it.
+                for job in store.open_jobs(source):
+                    if job["tier"] != tier1.name or job["variant_key"] != tier1.variant_key:
+                        continue
+                    job_segments = [segments[sid] for sid in job["segment_ids"]
+                                     if sid in segments]
+                    if len(job_segments) != len(job["segment_ids"]):
+                        continue
+                    tier1.adopt(job["job_id"], job_segments)
                 do_reconcile(source, tier1, store)
 
     payload = json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2)

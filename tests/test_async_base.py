@@ -136,3 +136,41 @@ def test_poll_caching_respects_pending_polls():
     cached = a.poll(job_id)
     assert cached == result
     assert inner.calls == calls_after_completion, "Cached result not re-computed"
+
+
+def test_adopt_makes_a_previously_unknown_job_pollable():
+    """A fresh process has no in-memory _jobs, but jobs rows are durable.
+
+    reconcile() in that process must be able to make an unknown job id
+    pollable again by rebuilding it from the durable segment list, without
+    re-submitting (which would re-derive/re-register rather than resume).
+    """
+    segs = _segs()
+    a = SyncAsyncAdapter(StubSync())
+    job_id = a.submit(segs)
+
+    # A fresh adapter over an equivalent inner backend, as a new process
+    # reconciling would construct.
+    b = SyncAsyncAdapter(StubSync())
+    with pytest.raises(JobNotFound):
+        b.poll(job_id)
+
+    b.adopt(job_id, segs)
+    result = b.poll(job_id)
+    assert result is not None
+    assert set(result.keys()) == {s.segment_id for s in segs}
+
+
+def test_adopt_does_not_reset_an_existing_poll_counter():
+    inner = StubSync()
+    a = SyncAsyncAdapter(inner, pending_polls=2)
+    segs = _segs()
+    job_id = a.submit(segs)
+
+    assert a.poll(job_id) is None  # 1st poll: counter now at 1
+
+    a.adopt(job_id, segs)  # must not reset the counter back to 0
+
+    assert a.poll(job_id) is None  # 2nd poll: counter now at 2, still pending
+    result = a.poll(job_id)  # 3rd poll: satisfies pending_polls=2
+    assert result is not None

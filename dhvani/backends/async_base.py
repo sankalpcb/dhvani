@@ -65,6 +65,21 @@ class SyncAsyncAdapter:
         self._polls.setdefault(job_id, 0)
         return job_id
 
+    def adopt(self, job_id: str, segments: list) -> None:
+        """Register a job this adapter instance never submitted.
+
+        jobs rows in the Store are durable, but _jobs is in-memory and
+        rebuilt empty by every new process. A reconcile-only run (no
+        --escalate in the same process) constructs a fresh adapter that
+        never called submit(), so poll() would raise JobNotFound for a job
+        that is genuinely outstanding. adopt() closes that gap by
+        rebuilding the segment list from the durable record -- without
+        re-submitting (which would be a fresh registration, not a resume)
+        and without resetting an in-progress poll counter.
+        """
+        self._jobs[job_id] = list(segments)
+        self._polls.setdefault(job_id, 0)
+
     def poll(self, job_id: str) -> dict | None:
         if job_id not in self._jobs:
             raise JobNotFound(f"unknown job id: {job_id}")

@@ -223,9 +223,21 @@ def escalate_selected(selected, tier1, store, segments_by_id,
                       tier0_variant: str = "") -> list[dict]:
     """Phase 2: run Tier 1 over the stratified sample and assemble rows.
 
-    Spend is reserved BEFORE each paid call, and a cached Tier 1 hypothesis
-    is reused without reserving again — re-running a calibration pass must
-    not re-charge for work already done.
+    Spend is NOT reserved here. `tier1` is a Recorded wrapper (that is what
+    the CLI passes), and Recorded.transcribe() atomically reserves against
+    the USD 20 ceiling immediately before the paid call. Reserving here as
+    well double-charged every call — a nominal $1.00 call reserved $2.00 —
+    which made --confirm understate the real spend by half and inflated
+    meta.spend_usd.
+
+    Recorded is also the only layer that knows whether a call is actually
+    paid: in replay mode it returns the fixture without reserving anything,
+    and cost_per_call() is 0.0. A reservation one level up cannot see that
+    distinction, which is exactly the class of bug fix round 3 (C2) had to
+    patch out of dhvani/cli.py.
+
+    A cached Tier 1 hypothesis is still reused without calling the backend
+    at all, so re-running a calibration pass re-charges nothing.
 
     The Tier 0 cache key is read PER ITEM from the scored record collect()
     wrote (`tier0_variant`), falling back to the `tier0_variant` argument
@@ -249,8 +261,10 @@ def escalate_selected(selected, tier1, store, segments_by_id,
         cached = store.get_hypothesis(segment_id, "tier1", tier1.variant_key)
         if cached is None:
             segment = segments_by_id[segment_id]
+            # cost is recorded against the hypothesis for attribution only;
+            # the reservation that enforces the ceiling happens inside
+            # tier1.transcribe() (Recorded). See the docstring.
             cost = tier1.cost_per_call(segment)
-            store.reserve_spend(tier1.name, cost)
             result = tier1.transcribe(segment)
             store.put_hypothesis(segment_id, "tier1", result["text"],
                                  result.get("signals", {}), cost, tier1.variant_key)

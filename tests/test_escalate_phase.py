@@ -2,6 +2,7 @@ import json
 import numpy as np
 import pytest
 
+from dhvani.backends.base import Recorded
 from dhvani.calibrate import estimate_cost, escalate_selected, write_table
 from dhvani.segmenter import Segment
 from dhvani.store import Store, BudgetExceeded
@@ -42,6 +43,20 @@ def _segments(selected):
             for s in selected}
 
 
+def _recorded(store, tmp_path):
+    """The stub wrapped exactly the way dhvani.cli_calibrate wraps the real
+    Tier1Chirp.
+
+    C3: escalate_selected() used to call store.reserve_spend() itself AND
+    hand the call to a Recorded wrapper that reserves again, so a nominal
+    $1.00 call reserved $2.00. The reservation now lives only in Recorded,
+    which is the only layer that knows whether a call is actually paid.
+    These tests therefore exercise the wrapped stack rather than a bare
+    stub -- moving them closer to what the CLI does, not further from it.
+    """
+    return Recorded(StubTier1(), "live", str(tmp_path / "fixtures"), store)
+
+
 def _seed_refs(store, selected):
     for s in selected:
         store.put_reference(s["segment_id"], "alpha beta gamma delta", "hi-IN")
@@ -66,29 +81,47 @@ def test_escalate_produces_one_row_per_selected_segment(store):
     assert set(rows[0]) == {"risk", "reference", "tier0_text", "tier1_text"}
 
 
-def test_escalate_reserves_spend_before_calling(store):
+def test_escalate_reserves_spend_before_calling(store, tmp_path):
     sel = _selected(2)
     _seed_refs(store, sel)
-    escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
+    escalate_selected(sel, _recorded(store, tmp_path), store, _segments(sel),
+                      "tier0|hi|m")
     assert store.total_spend() > 0.0
 
 
-def test_rerunning_escalation_reserves_nothing_further(store):
+def test_escalate_reserves_each_paid_call_exactly_once(store, tmp_path):
+    """C3 regression: with escalate_selected() reserving AND Recorded
+    reserving, the ledger read double the true cost -- so --confirm showed
+    the operator half of what was actually taken."""
+    from dhvani.backends.tier1_chirp import cost_for_duration_ms
+
+    sel = _selected(3)
+    _seed_refs(store, sel)
+    escalate_selected(sel, _recorded(store, tmp_path), store, _segments(sel),
+                      "tier0|hi|m")
+    assert store.total_spend() == pytest.approx(3 * cost_for_duration_ms(3000))
+
+
+def test_rerunning_escalation_reserves_nothing_further(store, tmp_path):
     """Idempotent spend: cached tier1 hypotheses must not be re-paid."""
     sel = _selected(3)
     _seed_refs(store, sel)
-    escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
+    escalate_selected(sel, _recorded(store, tmp_path), store, _segments(sel),
+                      "tier0|hi|m")
     after_first = store.total_spend()
-    escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
+    assert after_first > 0.0, "the first pass must actually have paid"
+    escalate_selected(sel, _recorded(store, tmp_path), store, _segments(sel),
+                      "tier0|hi|m")
     assert store.total_spend() == pytest.approx(after_first)
 
 
-def test_escalation_fails_closed_at_the_ceiling(store):
+def test_escalation_fails_closed_at_the_ceiling(store, tmp_path):
     sel = _selected(3)
     _seed_refs(store, sel)
     store.reserve_spend("tier1", 20.0 - 0.0001)
     with pytest.raises(BudgetExceeded):
-        escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
+        escalate_selected(sel, _recorded(store, tmp_path), store, _segments(sel),
+                          "tier0|hi|m")
 
 
 def test_segments_missing_a_reference_are_skipped(store):

@@ -1,0 +1,140 @@
+"""Calibration CLI: dhvani-calibrate collect | escalate
+
+Phase 1 (collect) is slow, free and local. Phase 2 (escalate) is fast, paid
+and remote, and refuses to spend without --confirm.
+
+Goal G5: importing this module must not require any ML dep, cloud SDK, or
+`datasets` package, and must touch no network or credentials. The imports
+of Tier0Conformer and IndicVoicesCorpus (collect) and of Recorded /
+Tier1Chirp / Segment / numpy (escalate) therefore stay INSIDE their
+branches below, not at module level.
+"""
+
+import argparse
+import json
+import sys
+
+from dhvani.calibrate import (
+    MIN_BUCKET_SAMPLES,
+    collect,
+    escalate_selected,
+    estimate_cost,
+    histogram,
+    stratify,
+    write_table,
+)
+from dhvani.store import Store
+
+DEFAULT_LANGS = ["kn-IN", "ml-IN", "hi-IN"]
+
+
+def _print_histogram(scored, stream=None):
+    # stream must resolve sys.stderr at CALL time, not at function
+    # definition time: a default of `stream=sys.stderr` binds once, at
+    # import, and goes stale under pytest's capsys, which swaps in a new
+    # sys.stderr object per test rather than patching the existing one.
+    if stream is None:
+        stream = sys.stderr
+    hist = histogram(scored)
+    print(f"collected {len(scored)} segments", file=stream)
+    for bucket, count in hist.items():
+        bar = "#" * min(count // 10, 50)
+        # stratify() silently drops any bucket under MIN_BUCKET_SAMPLES —
+        # without this marker, a line like "0.3-0.4: 15" gives no hint
+        # that it contributed nothing to the escalated sample.
+        marker = "" if count >= MIN_BUCKET_SAMPLES else "  (below floor, not escalated)"
+        print(f"  {bucket:10} {count:6d}  {bar}{marker}", file=stream)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="dhvani-calibrate")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("collect", help="phase 1: transcribe and score locally (free)")
+    c.add_argument("--db", default="calibration.db")
+    c.add_argument("--langs", nargs="+", default=DEFAULT_LANGS)
+    c.add_argument("--per-lang", type=int, default=1000)
+    c.add_argument("--scored-out", default="scored.json")
+
+    e = sub.add_parser("escalate", help="phase 2: stratify and run Tier 1 (paid)")
+    e.add_argument("--db", default="calibration.db")
+    e.add_argument("--scored-in", default="scored.json")
+    e.add_argument("--out", default="delta_table.json")
+    e.add_argument("--dry-run", action="store_true",
+                   help="stratify, print the estimate, and exit without spending")
+    e.add_argument("--confirm", action="store_true",
+                   help="required before any paid call")
+
+    args = ap.parse_args(argv)
+
+    if args.cmd == "collect":
+        from dhvani.backends.tier0_conformer import Tier0Conformer
+        from dhvani.corpus import IndicVoicesCorpus
+
+        corpus = IndicVoicesCorpus()
+        with Store(args.db) as store:
+            scored = collect(corpus, Tier0Conformer(), store, args.langs, args.per_lang)
+        _print_histogram(scored)
+        with open(args.scored_out, "w", encoding="utf-8") as fh:
+            json.dump(scored, fh, indent=2)
+        print(f"wrote {args.scored_out}", file=sys.stderr)
+        return 0
+
+    # escalate
+    try:
+        with open(args.scored_in, encoding="utf-8") as fh:
+            scored = json.load(fh)
+    except FileNotFoundError:
+        print(f"missing {args.scored_in}; run `dhvani-calibrate collect` first",
+              file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"{args.scored_in} is not valid JSON: {exc}", file=sys.stderr)
+        return 1
+
+    selected = stratify(scored)
+    estimate = estimate_cost(selected)
+    _print_histogram(scored)
+    print(f"stratified {len(selected)} segments; estimated cost ${estimate:.4f}",
+          file=sys.stderr)
+
+    if args.dry_run:
+        print("dry run: nothing spent, no table written", file=sys.stderr)
+        return 0
+
+    if not args.confirm:
+        print(f"refusing to spend ${estimate:.4f} without --confirm", file=sys.stderr)
+        return 2
+
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+    from dhvani.segmenter import Segment
+    import numpy as np
+
+    with Store(args.db) as store:
+        before = store.total_spend()
+        tier1 = Recorded(Tier1Chirp(), "live", "fixtures", store)
+        # Audio is not resent: Tier 1 reads it from GCS, and only the time
+        # bounds are needed to price the call.
+        segments = {s["segment_id"]: Segment(s["segment_id"], 0, s["duration_ms"],
+                                             np.zeros(1, dtype=np.int16))
+                    for s in selected}
+        rows = escalate_selected(selected, tier1, store, segments)
+        spent = store.total_spend() - before
+
+    # escalate_selected() silently skips any segment lacking a reference or
+    # a Tier 0 hypothesis. Without this line, "3 legitimately lacked Tier
+    # 0" and "the variant key was wrong so everything was skipped" are
+    # indistinguishable from the outside.
+    skipped = len(selected) - len(rows)
+    print(f"skipped {skipped} of {len(selected)} selected segments "
+          f"(no reference or Tier 0 hypothesis)", file=sys.stderr)
+
+    langs = sorted({s["lang"] for s in selected})
+    write_table(rows, selected, args.out, spent, langs)
+    print(f"wrote {args.out} from {len(rows)} rows; spent ${spent:.4f}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

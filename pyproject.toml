@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 dhvani = "dhvani.cli:main"
 dhvani-bench = "dhvani.report_cli:main"
+dhvani-calibrate = "dhvani.cli_calibrate:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

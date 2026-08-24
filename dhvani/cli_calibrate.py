@@ -6,8 +6,8 @@ and remote, and refuses to spend without --confirm.
 Goal G5: importing this module must not require any ML dep, cloud SDK, or
 `datasets` package, and must touch no network or credentials. The imports
 of Tier0Conformer and IndicVoicesCorpus (collect) and of Recorded /
-Tier1Chirp / Segment / numpy (escalate) therefore stay INSIDE their
-branches below, not at module level.
+Tier1Chirp (escalate) therefore stay INSIDE their branches below, not at
+module level.
 """
 
 import argparse
@@ -15,7 +15,10 @@ import json
 import sys
 
 from dhvani.calibrate import (
+    DEFAULT_PCM_CACHE,
     MIN_BUCKET_SAMPLES,
+    LazySegments,
+    PcmCacheMiss,
     collect,
     escalate_selected,
     estimate_cost,
@@ -55,11 +58,17 @@ def main(argv=None) -> int:
     c.add_argument("--langs", nargs="+", default=DEFAULT_LANGS)
     c.add_argument("--per-lang", type=int, default=1000)
     c.add_argument("--scored-out", default="scored.json")
+    c.add_argument("--pcm-cache", default=DEFAULT_PCM_CACHE,
+                   help="directory phase 1 writes segment PCM to and phase 2 "
+                        "reads it back from; both phases must be given the same one")
 
     e = sub.add_parser("escalate", help="phase 2: stratify and run Tier 1 (paid)")
     e.add_argument("--db", default="calibration.db")
     e.add_argument("--scored-in", default="scored.json")
     e.add_argument("--out", default="delta_table.json")
+    e.add_argument("--pcm-cache", default=DEFAULT_PCM_CACHE,
+                   help="directory phase 1 wrote segment PCM to; Tier 1 is sent "
+                        "this audio inline, so it must be the same directory")
     e.add_argument("--dry-run", action="store_true",
                    help="stratify, print the estimate, and exit without spending")
     e.add_argument("--confirm", action="store_true",
@@ -73,7 +82,8 @@ def main(argv=None) -> int:
 
         corpus = IndicVoicesCorpus()
         with Store(args.db) as store:
-            scored = collect(corpus, Tier0Conformer(), store, args.langs, args.per_lang)
+            scored = collect(corpus, Tier0Conformer(), store, args.langs,
+                             args.per_lang, args.pcm_cache)
         _print_histogram(scored)
         with open(args.scored_out, "w", encoding="utf-8") as fh:
             json.dump(scored, fh, indent=2)
@@ -108,19 +118,26 @@ def main(argv=None) -> int:
 
     from dhvani.backends.base import Recorded
     from dhvani.backends.tier1_chirp import Tier1Chirp
-    from dhvani.segmenter import Segment
-    import numpy as np
 
-    with Store(args.db) as store:
-        before = store.total_spend()
-        tier1 = Recorded(Tier1Chirp(), "live", "fixtures", store)
-        # Audio is not resent: Tier 1 reads it from GCS, and only the time
-        # bounds are needed to price the call.
-        segments = {s["segment_id"]: Segment(s["segment_id"], 0, s["duration_ms"],
-                                             np.zeros(1, dtype=np.int16))
-                    for s in selected}
-        rows = escalate_selected(selected, tier1, store, segments)
-        spent = store.total_spend() - before
+    # The audio comes from the PCM cache phase 1 wrote (--pcm-cache), because
+    # Tier1Chirp.transcribe() sends segment.pcm INLINE via recognize_pcm --
+    # there is no GCS object, and no other copy of the corpus survives the
+    # gap between the two phases. A missing file is fatal, deliberately:
+    # this used to pass np.zeros(1) under a comment claiming Tier 1 fetched
+    # the audio itself, which would have billed a real transcription of two
+    # bytes of silence for every selected segment and produced a uniformly
+    # wrong table that still looked plausible.
+    segments = LazySegments(selected, args.pcm_cache)
+
+    try:
+        with Store(args.db) as store:
+            before = store.total_spend()
+            tier1 = Recorded(Tier1Chirp(), "live", "fixtures", store)
+            rows = escalate_selected(selected, tier1, store, segments)
+            spent = store.total_spend() - before
+    except PcmCacheMiss as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
 
     # escalate_selected() silently skips any segment lacking a reference or
     # a Tier 0 hypothesis. Without this line, "3 legitimately lacked Tier

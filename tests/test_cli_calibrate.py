@@ -1,8 +1,9 @@
 import json
 
+import numpy as np
 import pytest
 
-from dhvani.calibrate import MIN_BUCKET_SAMPLES
+from dhvani.calibrate import MIN_BUCKET_SAMPLES, save_pcm
 from dhvani.cli_calibrate import main
 from dhvani.config import MAX_SPEND_USD
 from dhvani.store import BudgetExceeded, Store
@@ -33,6 +34,21 @@ def test_escalate_subcommand_exists():
 # every segment. Anything that seeds a Tier 0 hypothesis for the CLI to find
 # must use this.
 TIER0_VARIANT = "lang=hi;model_id=ai4bharat/indic-conformer-600m-multilingual"
+
+
+def _seed_pcm(tmp_path, scored):
+    """Write the PCM cache phase 1 would have written.
+
+    Not optional scaffolding: Tier1Chirp sends segment.pcm inline, so phase
+    2 loads real audio out of this directory. The CLI used to fabricate
+    np.zeros(1) here instead (C2).
+    """
+    cache = tmp_path / "pcm"
+    rng = np.random.default_rng(3)
+    for item in scored:
+        save_pcm(str(cache), item["segment_id"],
+                 (3000 * rng.standard_normal(48000)).astype(np.int16))
+    return str(cache)
 
 
 def _seed_scored(tmp_path, n=25, risk=0.65, prefix="s"):
@@ -117,6 +133,7 @@ def test_budget_failure_leaves_no_table_behind(tmp_path):
     with pytest.raises(BudgetExceeded):
         main(["escalate", "--db", db,
               "--scored-in", str(scored_path),
+              "--pcm-cache", _seed_pcm(tmp_path, scored),
               "--out", str(out), "--confirm"])
     assert not out.exists()
 
@@ -195,6 +212,7 @@ def test_write_table_gets_marginal_spend_not_cumulative(tmp_path, monkeypatch):
 
     out = tmp_path / "delta_table.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", _seed_pcm(tmp_path, scored),
                "--out", str(out), "--confirm"])
     assert rc == 0
 
@@ -241,6 +259,7 @@ def test_escalate_finds_tier0_under_the_real_variant_key(tmp_path, monkeypatch):
 
     out = tmp_path / "delta_table.json"
     rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", _seed_pcm(tmp_path, scored),
                "--out", str(out), "--confirm"])
     assert rc == 0
 
@@ -248,3 +267,86 @@ def test_escalate_finds_tier0_under_the_real_variant_key(tmp_path, monkeypatch):
     assert payload["tier1"], "no bucket measured: every segment was skipped"
     assert "0.6-0.7" in payload["tier1"]
     assert payload["meta"]["bucket_n"]["0.6-0.7"] == 25
+
+
+# --- C2: phase 2 must send the real audio, not a silence stub ---
+
+class _RecordingTier1:
+    """Captures the Segment it was handed. The CLI used to fabricate
+    Segment(..., np.zeros(1)) under a comment claiming Tier 1 fetched the
+    audio from GCS; there is no GCS path in this repo and
+    Tier1Chirp.transcribe() sends segment.pcm inline, so that would have
+    billed a transcription of 2 bytes of silence per segment."""
+
+    name = "tier1"
+    seen = []
+
+    def __init__(self, lang="hi-IN", **kwargs):
+        self.lang = lang
+
+    @property
+    def variant_key(self):
+        return f"recording;lang={self.lang}"
+
+    def cost_per_call(self, segment):
+        return 0.001
+
+    def transcribe(self, segment):
+        _RecordingTier1.seen.append(segment)
+        return {"text": "chirp output", "signals": {}}
+
+
+def test_escalate_sends_real_audio_from_the_pcm_cache(tmp_path, monkeypatch):
+    _RecordingTier1.seen = []
+    monkeypatch.setattr("dhvani.backends.tier1_chirp.Tier1Chirp", _RecordingTier1)
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", _seed_pcm(tmp_path, scored),
+               "--out", str(tmp_path / "d.json"), "--confirm"])
+    assert rc == 0
+
+    assert len(_RecordingTier1.seen) == 25
+    for segment in _RecordingTier1.seen:
+        assert len(segment.pcm) > 1, "sent a silence stub instead of the audio"
+        assert segment.pcm.dtype == np.int16
+    assert len({seg.pcm.tobytes() for seg in _RecordingTier1.seen}) == 25, (
+        "every segment must carry its own audio, not one shared array"
+    )
+
+
+def test_escalate_fails_loudly_when_pcm_is_not_cached(tmp_path, monkeypatch, capsys):
+    """Never a silent skip and never a zero array."""
+    _RecordingTier1.seen = []
+    monkeypatch.setattr("dhvani.backends.tier1_chirp.Tier1Chirp", _RecordingTier1)
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    out = tmp_path / "d.json"
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", str(tmp_path / "empty-cache"),
+               "--out", str(out), "--confirm"])
+
+    assert rc != 0, "a missing PCM cache must not exit 0"
+    err = capsys.readouterr().err
+    assert scored[0]["segment_id"] in err, "must name the segment"
+    assert "empty-cache" in err, "must name the expected path"
+    assert not out.exists()
+    assert _RecordingTier1.seen == [], "must not transcribe anything"

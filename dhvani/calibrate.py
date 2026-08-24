@@ -10,8 +10,11 @@ invariant I3 exists to filter.
 """
 
 import json
+import os
 from collections import defaultdict
 from datetime import date
+
+import numpy as np
 
 from dhvani.backends.tier1_chirp import cost_for_duration_ms
 from dhvani.config import POLICY_ID, RISK_WEIGHTS
@@ -26,6 +29,92 @@ from dhvani.segmenter import Segment
 MIN_BUCKET_SAMPLES = 20
 
 N_PER_BUCKET = 100
+
+DEFAULT_PCM_CACHE = "calibration_pcm"
+"""Where phase 1 parks the audio phase 2 needs.
+
+Calibration is deliberately two processes: collect is slow, free and local;
+escalate is fast, paid and remote, and an operator inspects the histogram in
+between. That split means the escalate process no longer holds the corpus
+audio in memory, and Tier1Chirp.transcribe() sends segment.pcm INLINE (see
+its recognize_pcm call) — there is no GCS object for it to read instead.
+
+So phase 1 writes each normalized segment's PCM here as
+<cache_dir>/<segment_id>.npy (numpy.save of the mono int16 array) and phase
+2 loads it back. Content-addressed like everything else: segment_id is the
+SHA256 of exactly these bytes, so a stale file is impossible — a changed
+array is a changed name.
+"""
+
+
+class PcmCacheMiss(RuntimeError):
+    """Phase 2 needed a segment's audio and phase 1 had not cached it."""
+
+
+def pcm_cache_path(cache_dir: str, segment_id: str) -> str:
+    return os.path.join(cache_dir, f"{segment_id}.npy")
+
+
+def save_pcm(cache_dir: str, segment_id: str, pcm) -> str:
+    """Write one segment's normalized PCM, unless it is already there.
+
+    Skipping an existing file keeps collect() resumable at the same cost as
+    its hypothesis cache: a killed multi-hour run restarts without rewriting
+    gigabytes it already has.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    path = pcm_cache_path(cache_dir, segment_id)
+    if not os.path.exists(path):
+        np.save(path, pcm)
+    return path
+
+
+def load_pcm(cache_dir: str, segment_id: str):
+    """Read one segment's PCM back, or raise naming what is missing.
+
+    Hard error by design. The alternatives are both worse and both were
+    live in this file's history: skipping the segment silently shrinks the
+    measured sample without saying so, and substituting a zero array sends
+    silence to a paid transcriber, which returns "" and poisons every delta
+    in the bucket while the table still looks plausible.
+    """
+    path = pcm_cache_path(cache_dir, segment_id)
+    if not os.path.exists(path):
+        raise PcmCacheMiss(
+            f"no cached PCM for segment {segment_id}: expected {path}. "
+            f"Phase 2 sends the audio inline to Tier 1, so it cannot proceed "
+            f"without it. Re-run `dhvani-calibrate collect` with "
+            f"--pcm-cache {cache_dir}."
+        )
+    return np.load(path)
+
+
+class LazySegments:
+    """segment_id -> Segment, reading PCM from the cache on demand.
+
+    Deliberately lazy rather than a dict comprehension over `selected`.
+    escalate_selected() skips segments with no reference or no Tier 0
+    hypothesis and never touches their audio, and it reuses cached Tier 1
+    hypotheses without re-transcribing — so eagerly loading every selected
+    segment's PCM would both hold the whole sample in memory at once and
+    turn a missing file for a segment that was never going to be escalated
+    into a fatal error. A miss is fatal only when the audio is actually
+    needed.
+    """
+
+    def __init__(self, selected, cache_dir: str):
+        self._duration_ms = {s["segment_id"]: s["duration_ms"] for s in selected}
+        self._cache_dir = cache_dir
+
+    def __contains__(self, segment_id: str) -> bool:
+        return segment_id in self._duration_ms
+
+    def __len__(self) -> int:
+        return len(self._duration_ms)
+
+    def __getitem__(self, segment_id: str) -> Segment:
+        return Segment(segment_id, 0, self._duration_ms[segment_id],
+                       load_pcm(self._cache_dir, segment_id))
 
 
 def histogram(scored: list[dict]) -> dict:
@@ -57,18 +146,26 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
     return chosen
 
 
-def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
+def collect(corpus, tier0, store, langs, per_lang: int,
+            pcm_cache_dir: str) -> list[dict]:
     """Phase 1: transcribe and score a corpus locally. Slow, free, resumable.
 
     One utterance is one segment (spec §1.2), so the segmenter is bypassed
     and every segment keeps its own reference. Already-transcribed segments
     are read from the store rather than re-run — that is what lets a
     multi-hour run be killed and restarted without losing work.
+
+    pcm_cache_dir is required, not optional: phase 2 has no other source for
+    the audio (see DEFAULT_PCM_CACHE), so a collect run that quietly skipped
+    caching would produce a scored.json that cannot be escalated.
     """
     scored: list[dict] = []
+    seen: set[str] = set()
 
     for lang in langs:
         for item in corpus.stream(lang, limit=per_lang):
+            save_pcm(pcm_cache_dir, item.segment_id, item.pcm)
+
             store.put_segment(item.segment_id, f"calib:{lang}", 0,
                               item.duration_ms, lang)
             store.put_reference(item.segment_id, item.reference, lang,
@@ -82,6 +179,17 @@ def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
                                      result["signals"], 0.0, tier0.variant_key)
             else:
                 result = {"text": cached["text"], "signals": cached["signals"]}
+
+            if item.segment_id in seen:
+                # R9: segment_id is content-addressed, so N byte-identical
+                # utterances are ONE segment with one reference and one
+                # hypothesis — but appending N scored entries would let that
+                # single segment push a bucket over MIN_BUCKET_SAMPLES by
+                # itself and would weight its delta N times in build()'s
+                # mean. The store rows above are INSERT OR IGNORE and are
+                # already idempotent; this makes the scored list match them.
+                continue
+            seen.add(item.segment_id)
 
             features = extract(result["text"], result["signals"], item.duration_ms)
             scored.append({

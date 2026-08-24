@@ -165,16 +165,28 @@ def test_reports_skipped_segments_to_stderr(tmp_path, capsys):
     """An empty store means every selected segment lacks a reference and a
     Tier 0 hypothesis, so escalate_selected skips all of them. That must be
     visible, not silent — otherwise "3 legitimately lacked Tier 0" and "the
-    variant key was wrong so everything was skipped" look identical."""
+    variant key was wrong so everything was skipped" look identical.
+
+    DELIBERATE CHANGE (I7): this used to assert rc == 0, pinning exactly the
+    behaviour now considered wrong — an all-skipped run wrote {"tier1": {}}
+    and reported success, which the router reads as "Tier 1 never helps".
+    The skip report is unchanged and still asserted; only the exit code and
+    the refusal to write are new.
+
+    The old `assert "25" in err` was also satisfied coincidentally by the
+    "collected 25 segments" histogram header, so it would have passed with
+    the skip line absent entirely. It now matches the skip line itself.
+    """
     db = str(tmp_path / "t.db")
+    out = tmp_path / "d.json"
     scored_path = _seed_scored(tmp_path, n=25)
 
     rc = main(["escalate", "--db", db, "--scored-in", scored_path,
-               "--out", str(tmp_path / "d.json"), "--confirm"])
-    assert rc == 0
+               "--out", str(out), "--confirm"])
+    assert rc != 0, "a run that measured nothing must not report success"
     err = capsys.readouterr().err
-    assert "25" in err
-    assert "skip" in err.lower()
+    assert "skipped 25 of 25 selected segments" in err
+    assert not out.exists(), "no table may be written from zero rows"
 
 
 # --- Addition 4: write_table must receive this run's marginal spend only ---

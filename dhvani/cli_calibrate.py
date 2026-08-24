@@ -19,6 +19,7 @@ from dhvani.calibrate import (
     DEFAULT_PCM_CACHE,
     MIN_BUCKET_SAMPLES,
     LazySegments,
+    NoMeasuredBuckets,
     PcmCacheMiss,
     collect,
     escalate_selected,
@@ -176,7 +177,18 @@ def main(argv=None) -> int:
     print(f"skipped {skipped} of {len(selected)} selected segments "
           f"(no reference or Tier 0 hypothesis)", file=sys.stderr)
 
-    write_table(rows, selected, args.out, spent, langs)
+    # I7: a run that measured nothing must NOT write a table and must NOT
+    # exit 0. delta_table.json is what the router trusts as measurement, so
+    # {"tier1": {}} written on a fully-skipped run reads to it as "Tier 1
+    # never helps" -- and the money for this run is already spent by now.
+    # Refusing also leaves any previous, real table on disk untouched.
+    try:
+        write_table(rows, selected, args.out, spent, langs)
+    except NoMeasuredBuckets as exc:
+        print(str(exc), file=sys.stderr)
+        print(f"spent ${spent:.4f} and wrote no table", file=sys.stderr)
+        return 4
+
     print(f"wrote {args.out} from {len(rows)} rows; spent ${spent:.4f}", file=sys.stderr)
     return 0
 

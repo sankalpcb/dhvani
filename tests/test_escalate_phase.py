@@ -198,3 +198,30 @@ def test_write_table_keeps_a_bucket_exactly_at_the_floor(tmp_path):
     write_table(rows, _selected(MIN_BUCKET_SAMPLES), str(path),
                 spend_usd=0.0, langs=["hi-IN"])
     assert "0.6-0.7" in json.loads(path.read_text())["tier1"]
+
+
+# --- I7: an empty or floor-less table must not be written at all ---
+
+def test_write_table_refuses_to_write_an_empty_table(tmp_path):
+    from dhvani.calibrate import NoMeasuredBuckets
+
+    path = tmp_path / "delta_table.json"
+    with pytest.raises(NoMeasuredBuckets) as exc:
+        write_table([], _selected(25), str(path), spend_usd=0.0, langs=["hi-IN"])
+    assert str(path) in str(exc.value)
+    assert not path.exists(), "must leave any previous, real table in place"
+
+
+def test_write_table_refuses_when_no_bucket_clears_the_floor(tmp_path):
+    """Rows existed, but every bucket was too thin to mean anything. That is
+    still the absence of measurement, not a measurement of zero."""
+    from dhvani.calibrate import NoMeasuredBuckets
+
+    rows = ([{"risk": 0.35, "reference": "a b", "tier0_text": "a X",
+              "tier1_text": "a b"}] * 3
+            + [{"risk": 0.65, "reference": "a b", "tier0_text": "a X",
+                "tier1_text": "a b"}] * 4)
+    path = tmp_path / "delta_table.json"
+    with pytest.raises(NoMeasuredBuckets):
+        write_table(rows, _selected(7), str(path), spend_usd=0.0, langs=["hi-IN"])
+    assert not path.exists()

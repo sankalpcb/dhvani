@@ -52,6 +52,18 @@ class PcmCacheMiss(RuntimeError):
     """Phase 2 needed a segment's audio and phase 1 had not cached it."""
 
 
+class NoMeasuredBuckets(RuntimeError):
+    """A calibration run produced nothing worth publishing.
+
+    I7: write_table had no guard on len(rows) and the CLI wrote
+    unconditionally and returned 0, so a run in which every segment was
+    skipped emitted {"tier1": {}} and reported success. The router reads
+    delta_table.json as measurement; an empty or floor-less one is the
+    absence of measurement, and must not be mistaken for "Tier 1 never
+    helps". Refusing to write leaves any previous, real table in place.
+    """
+
+
 def pcm_cache_path(cache_dir: str, segment_id: str) -> str:
     return os.path.join(cache_dir, f"{segment_id}.npy")
 
@@ -307,6 +319,14 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
     and pay for it" outcome the floor exists to prevent. Omission degrades
     to "do not escalate"; a noisy average degrades to spending money.
     """
+    if not rows:
+        raise NoMeasuredBuckets(
+            f"no rows to measure: all {len(selected)} selected segments were "
+            f"skipped for lack of a reference or a Tier 0 hypothesis. "
+            f"Refusing to write {path} -- an empty table is indistinguishable "
+            f"from 'Tier 1 never helps'."
+        )
+
     table = build_delta_table(rows)
 
     bucket_n: dict[str, int] = defaultdict(int)
@@ -321,6 +341,14 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
               f"{MIN_BUCKET_SAMPLES}-sample floor after skipping: "
               + ", ".join(f"{b} (n={bucket_n[b]})" for b in dropped),
               file=sys.stderr)
+
+    if not table["tier1"]:
+        raise NoMeasuredBuckets(
+            f"no risk bucket reached the {MIN_BUCKET_SAMPLES}-sample floor "
+            f"from {len(rows)} row(s): "
+            + ", ".join(f"{b} (n={n})" for b, n in sorted(bucket_n.items()))
+            + f". Refusing to write {path}."
+        )
 
     payload = dict(table)
     payload["meta"] = {

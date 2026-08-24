@@ -19,6 +19,11 @@ from dhvani.audio import normalize
 from dhvani.config import SAMPLE_RATE
 from dhvani.ids import segment_id as compute_id
 
+# Threshold for probing dataset schema. If this many rows have been examined
+# without producing any items, the field name guesses are likely wrong and we
+# should fail loud rather than silently yield nothing.
+SCHEMA_PROBE_ROWS = 50
+
 
 @dataclass(frozen=True)
 class CorpusItem:
@@ -41,6 +46,22 @@ def _make_item(raw, src_rate, reference, lang, speaker_id, district) -> CorpusIt
         speaker_id=speaker_id,
         district=district,
         duration_ms=int(len(pcm) * 1000 / SAMPLE_RATE),
+    )
+
+
+def _extract_item_from_row(row: dict, lang: str) -> CorpusItem | None:
+    """Extract a CorpusItem from a dataset row, or None if fields are missing.
+
+    Tests the row against the expected field names: "audio", "text"/"transcript",
+    "speaker_id", "district". Returns None if required fields are absent.
+    """
+    audio = row.get("audio")
+    reference = row.get("text") or row.get("transcript") or ""
+    if not audio or not reference.strip():
+        return None
+    return _make_item(
+        audio["array"], audio["sampling_rate"], reference, lang,
+        row.get("speaker_id"), row.get("district"),
     )
 
 
@@ -97,15 +118,36 @@ class IndicVoicesCorpus:
         ds = load_dataset(self.dataset_id, config, split="train", streaming=True)
 
         count = 0
+        rows_examined = 0
+        items_yielded = 0
+        sample_row = None
+
         for row in ds:
+            rows_examined += 1
+            if sample_row is None:
+                sample_row = row
+
             if count >= limit:
                 return
-            audio = row.get("audio")
-            reference = row.get("text") or row.get("transcript") or ""
-            if not audio or not reference.strip():
+
+            item = _extract_item_from_row(row, lang)
+            if item is None:
+                # After SCHEMA_PROBE_ROWS rows with zero items, raise an exception
+                if rows_examined >= SCHEMA_PROBE_ROWS and items_yielded == 0:
+                    expected_fields = ["audio", "text/transcript", "speaker_id", "district"]
+                    actual_keys = list(sample_row.keys()) if sample_row else []
+                    raise ValueError(
+                        f"Dataset schema mismatch: examined {rows_examined} rows from "
+                        f"dataset '{self.dataset_id}' config '{config}', but no items produced. "
+                        f"Expected fields: {expected_fields}. Actual row keys: {actual_keys}"
+                    )
                 continue
-            yield _make_item(
-                audio["array"], audio["sampling_rate"], reference, lang,
-                row.get("speaker_id"), row.get("district"),
-            )
+
+            yield item
+            items_yielded += 1
             count += 1
+
+            # Once we've yielded at least one item, the schema is correct
+            if items_yielded >= 1:
+                # Reset the probe so we don't raise later
+                rows_examined = 0

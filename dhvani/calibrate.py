@@ -11,6 +11,7 @@ invariant I3 exists to filter.
 
 import json
 import os
+import sys
 from collections import defaultdict
 from datetime import date
 
@@ -287,6 +288,15 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
 
     build()'s contract is untouched; meta is additive. Nothing enforces meta
     (spec non-goal N3), but a stale table becomes visible rather than silent.
+
+    I4: MIN_BUCKET_SAMPLES is re-applied HERE, against the surviving row
+    count. stratify() applies it to the SCORED population, but rows are
+    dropped afterwards inside escalate_selected() (no reference, no Tier 0
+    hypothesis), and build() averages whatever it is handed. A bucket with
+    22 scored segments that loses 19 to skipping used to publish a
+    3-sample mean as a measured value — precisely the "escalate wrongly,
+    and pay for it" outcome the floor exists to prevent. Omission degrades
+    to "do not escalate"; a noisy average degrades to spending money.
     """
     table = build_delta_table(rows)
 
@@ -294,11 +304,24 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
     for row in rows:
         bucket_n[bucket_of(row["risk"])] += 1
 
+    dropped = sorted(b for b in table["tier1"] if bucket_n[b] < MIN_BUCKET_SAMPLES)
+    if dropped:
+        table = {"tier1": {b: v for b, v in table["tier1"].items()
+                           if b not in set(dropped)}}
+        print(f"dropped {len(dropped)} bucket(s) below the "
+              f"{MIN_BUCKET_SAMPLES}-sample floor after skipping: "
+              + ", ".join(f"{b} (n={bucket_n[b]})" for b in dropped),
+              file=sys.stderr)
+
     payload = dict(table)
     payload["meta"] = {
         "policy_id": POLICY_ID,
         "risk_weights": dict(RISK_WEIGHTS),
+        # bucket_n keeps the PRE-drop counts on purpose: it is the evidence
+        # for why a bucket named in dropped_buckets is absent from the table.
         "bucket_n": dict(sorted(bucket_n.items())),
+        "dropped_buckets": dropped,
+        "min_bucket_samples": MIN_BUCKET_SAMPLES,
         "languages": list(langs),
         "segments_escalated": len(selected),
         "spend_usd": round(spend_usd, 6),

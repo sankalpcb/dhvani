@@ -3,7 +3,12 @@ import numpy as np
 import pytest
 
 from dhvani.backends.base import Recorded
-from dhvani.calibrate import estimate_cost, escalate_selected, write_table
+from dhvani.calibrate import (
+    MIN_BUCKET_SAMPLES,
+    escalate_selected,
+    estimate_cost,
+    write_table,
+)
 from dhvani.segmenter import Segment
 from dhvani.store import Store, BudgetExceeded
 
@@ -156,3 +161,40 @@ def test_write_table_records_per_bucket_counts(tmp_path):
     path = tmp_path / "t.json"
     write_table(rows, sel, str(path), spend_usd=0.0, langs=["hi-IN"])
     assert json.loads(path.read_text())["meta"]["bucket_n"]["0.6-0.7"] == 22
+
+
+# --- I4: the sample floor must guard the SURVIVING rows, not the scored ones ---
+
+def test_write_table_drops_buckets_that_fell_below_the_floor(tmp_path):
+    """stratify() applies MIN_BUCKET_SAMPLES to the scored population, but
+    escalate_selected() drops rows afterwards. A bucket that entered with
+    22 scored segments and left with 3 rows used to publish a 3-sample mean
+    as a measured value."""
+    thin = [{"risk": 0.35, "reference": "a b c d",
+             "tier0_text": "a b c X", "tier1_text": "a b c d"}] * 3
+    fat = [{"risk": 0.65, "reference": "a b c d",
+            "tier0_text": "a b c X", "tier1_text": "a b c d"}] * MIN_BUCKET_SAMPLES
+
+    path = tmp_path / "delta_table.json"
+    table = write_table(thin + fat, _selected(23), str(path),
+                        spend_usd=0.0, langs=["hi-IN"])
+
+    written = json.loads(path.read_text())
+    assert "0.3-0.4" not in written["tier1"], "under-floor bucket must not be published"
+    assert "0.6-0.7" in written["tier1"]
+    assert table["tier1"] == written["tier1"], "return value must match the file"
+    assert written["meta"]["dropped_buckets"] == ["0.3-0.4"], (
+        "a bucket dropped for thinness must be reported, not vanish silently"
+    )
+    assert written["meta"]["bucket_n"]["0.3-0.4"] == 3, (
+        "bucket_n keeps the pre-drop count as the evidence for the drop"
+    )
+
+
+def test_write_table_keeps_a_bucket_exactly_at_the_floor(tmp_path):
+    rows = [{"risk": 0.65, "reference": "a b", "tier0_text": "a b",
+             "tier1_text": "a b"}] * MIN_BUCKET_SAMPLES
+    path = tmp_path / "t.json"
+    write_table(rows, _selected(MIN_BUCKET_SAMPLES), str(path),
+                spend_usd=0.0, langs=["hi-IN"])
+    assert "0.6-0.7" in json.loads(path.read_text())["tier1"]

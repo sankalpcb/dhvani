@@ -153,12 +153,39 @@ def test_recognizer_path_uses_configured_recognizer_when_given():
 
 
 def test_recognizer_path_falls_back_to_wildcard_when_empty(monkeypatch):
-    """The default (empty recognizer) must fall back to the previous
-    wildcard-per-project path, built via _project()."""
+    """The default (empty recognizer) falls back to the wildcard-per-project
+    path, built via _project() and pinned to the configured REGION.
+
+    This previously asserted `locations/global`. scripts/spike_chirp.py
+    (2026-08-24) proved that wrong: `global` hosts no chirp model of any
+    generation, so a global recognizer path can never resolve one. Changed
+    deliberately, not to make a failure go away."""
     import dhvani.backends.tier1_chirp as mod
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
-    assert mod._recognizer_path("") == "projects/test-project/locations/global/recognizers/_"
+    assert mod._recognizer_path("") == (
+        f"projects/test-project/locations/{mod.SPEECH_LOCATION}/recognizers/_"
+    )
+
+
+def test_recognizer_path_is_never_global(monkeypatch):
+    """Regression guard for the spike's finding: `global` holds no chirp
+    model, so reverting the recognizer path to it would make every live
+    Tier 1 call fail with 'model does not exist in the location named
+    global'. Pins the region away from that value."""
+    import dhvani.backends.tier1_chirp as mod
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    assert mod.SPEECH_LOCATION != "global"
+    assert "locations/global" not in mod._recognizer_path("")
+
+
+def test_configured_model_is_not_the_withdrawn_chirp_3():
+    """chirp_3 returned 403 'no longer generally available' for hi-IN in
+    asia-south1, and does not exist in us-central1 or europe-west4."""
+    import dhvani.backends.tier1_chirp as mod
+
+    assert mod.SPEECH_MODEL != "chirp_3"
 
 
 def test_recognizer_path_fails_closed_without_project_when_empty(monkeypatch):

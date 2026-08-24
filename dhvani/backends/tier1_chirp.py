@@ -19,8 +19,24 @@ Fix round 1 (post-review): cost_per_call() rounds each segment's duration up
 to BILLING_INCREMENT_SEC before pricing it -- see that constant's docstring.
 """
 
+import os
+
 USD_PER_MIN_DYNAMIC_BATCH = 0.003
 USD_PER_MIN_STANDARD = 0.016
+
+# Region and model, both settled by scripts/spike_chirp.py on 2026-08-24.
+#
+# `chirp_3` is NOT usable: asia-south1 returns
+#   403 ... on model chirp_3 locale hi-IN. It is no longer generally available.
+# and us-central1 / europe-west4 report it does not exist at all. `global`
+# holds no chirp model of any generation, so the recognizer path must be
+# regional and the client needs a regional endpoint.
+#
+# Verified working: europe-west4/chirp_2 and us-central1/chirp. asia-south1
+# (Mumbai) offers neither, so Indian-language audio is transcribed outside
+# India — a data-residency point worth stating rather than discovering later.
+SPEECH_LOCATION = os.environ.get("DHVANI_SPEECH_LOCATION", "europe-west4")
+SPEECH_MODEL = os.environ.get("DHVANI_SPEECH_MODEL", "chirp_2")
 
 BILLING_INCREMENT_SEC = 15
 """Google Cloud Speech-to-Text has historically billed synchronous/batch
@@ -130,17 +146,21 @@ def _recognizer_path(recognizer: str) -> str:
     """
     if recognizer:
         return recognizer
-    return f"projects/{_project()}/locations/global/recognizers/_"
+    return f"projects/{_project()}/locations/{SPEECH_LOCATION}/recognizers/_"
 
 
 def _default_client(recognizer: str = ""):
     """Thin adapter over SpeechClient exposing recognize_pcm(pcm, lang) -> str."""
+    from google.api_core.client_options import ClientOptions
     from google.cloud.speech_v2 import SpeechClient
     from google.cloud.speech_v2.types import cloud_speech as cs
 
     class _Client:
         def __init__(self, recognizer: str):
-            self._inner = SpeechClient()
+            # Chirp models live in regional endpoints; the default global
+            # endpoint serves none of them.
+            self._inner = SpeechClient(client_options=ClientOptions(
+                api_endpoint=f"{SPEECH_LOCATION}-speech.googleapis.com"))
             self._recognizer = recognizer
 
         def recognize_pcm(self, pcm, lang: str) -> str:
@@ -152,7 +172,7 @@ def _default_client(recognizer: str = ""):
                         sample_rate_hertz=16000,
                         audio_channel_count=1,
                     ),
-                    model="chirp_3",
+                    model=SPEECH_MODEL,
                     language_codes=[lang],
                 ),
                 content=pcm.tobytes(),

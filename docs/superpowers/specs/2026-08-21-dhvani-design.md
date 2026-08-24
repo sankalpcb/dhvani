@@ -540,3 +540,40 @@ Consequences:
   Harmless for our use (we supply our own segment boundaries), but noted.
 
 Spike 2 (Chirp 3 dynamic batching) remains **OPEN** pending GCP credentials.
+
+### 14.2 Spike 2 result — PARTIALLY CLOSED (2026-08-24)
+
+Run against a real GCP project (`dhvani-spike-18862`) with billing enabled and ADC configured.
+The spike issues a plain-batch **control** request alongside the dynamic-batch one, and that
+control is what stopped a false finding being recorded.
+
+**Q1: is DYNAMIC_BATCHING accepted? YES — CLOSED.**
+Confirmed accepted on `europe-west4/chirp_2` and `us-central1/chirp`, both with and without the
+strategy. `USD_PER_MIN_DYNAMIC_BATCH = 0.003` stands; the benchmark stays at roughly **$2.70**,
+not $14.40.
+
+**Q2: is `BILLING_INCREMENT_SEC = 15` real? STILL UNVERIFIED.**
+Cannot be answered by an API call — it needs actual billing line items, which take ~24h to
+appear in Cloud Billing export. The constant remains a deliberate conservative guess.
+
+**Unexpected finding: the model and location in our code were both wrong.**
+
+| Region | `chirp_3` | `chirp_2` | `chirp` |
+|---|---|---|---|
+| `asia-south1` (Mumbai) | 403 — *"no longer generally available"* for `hi-IN` | does not exist | does not exist |
+| `us-central1` | does not exist | 403 | **works** |
+| `europe-west4` | does not exist | **works** | — |
+| `global` | no chirp model of any generation | — | — |
+
+Three consequences, all now fixed in `dhvani/backends/tier1_chirp.py`:
+
+1. `model="chirp_3"` was hardcoded. It is withdrawn. Now `SPEECH_MODEL`, default `chirp_2`.
+2. The recognizer path used `locations/global`, which hosts no chirp model, so every live call
+   would have failed with *"does not exist in the location named global"*. Now `SPEECH_LOCATION`.
+3. The client used the default global endpoint. Chirp requires a regional one
+   (`{region}-speech.googleapis.com`). Now set from `SPEECH_LOCATION`.
+
+**Data-residency note worth stating explicitly:** `asia-south1` (Mumbai) offers no usable chirp
+model, so a project about Indian-language speech must transcribe that audio outside India —
+currently `europe-west4`. Both are overridable via `DHVANI_SPEECH_LOCATION` /
+`DHVANI_SPEECH_MODEL`.

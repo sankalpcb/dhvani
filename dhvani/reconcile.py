@@ -29,6 +29,18 @@ from dhvani.config import POLICY_ID
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.track import entries_from_json, entries_to_json, merge_entries
 
+# Bounds how many times reconcile() will retry a single job -- via a raising
+# poll() (TransientError, JobNotFound, ...) or a batch that keeps coming
+# back incomplete -- before giving up on it. A job is retried on every pass
+# while store.bump_job_attempts() reports MAX_JOB_ATTEMPTS or fewer attempts;
+# once it exceeds MAX_JOB_ATTEMPTS the job is dead-lettered (state "failed")
+# so it drops out of open_jobs(). Without this ceiling a permanently-failing
+# job never leaves "running", and because open_jobs() is ORDER BY job_id, a
+# low-sorting stuck job would be polled first on every single pass forever
+# -- an unguarded exception from its poll() would abandon the whole
+# reconcile() pass, starving every other job on the backend indefinitely.
+MAX_JOB_ATTEMPTS = 5
+
 
 def reconcile(source_id: str, backend, store) -> int:
     """Merge any completed jobs for this backend. Returns the latest version."""
@@ -49,8 +61,23 @@ def reconcile(source_id: str, backend, store) -> int:
         if job["tier"] != backend.name or job["variant_key"] != backend.variant_key:
             continue
 
-        store.bump_job_attempts(job["job_id"])
-        results = backend.poll(job["job_id"])
+        attempts = store.bump_job_attempts(job["job_id"])
+
+        # Per-job isolation: a raising poll() (TransientError, JobNotFound,
+        # ...) must not abort this whole pass -- that would abandon every
+        # other job in this loop, and since open_jobs() is ORDER BY
+        # job_id, a permanently-failing job whose id sorts first would
+        # starve the rest of the queue forever. Catch it, retry-or-
+        # dead-letter this one job, and move on.
+        try:
+            results = backend.poll(job["job_id"])
+        except Exception:
+            store.set_job_state(
+                job["job_id"],
+                "failed" if attempts > MAX_JOB_ATTEMPTS else "running",
+            )
+            continue
+
         if results is None:
             store.set_job_state(job["job_id"], "running")
             continue
@@ -72,8 +99,15 @@ def reconcile(source_id: str, backend, store) -> int:
         else:
             # Partial delivery: some registered segment_ids did not come
             # back in this batch. Leave the job running so open_jobs()
-            # still returns it and a later pass retries the missing ones.
-            store.set_job_state(job["job_id"], "running")
+            # still returns it and a later pass retries the missing ones
+            # -- unless this has now happened more than MAX_JOB_ATTEMPTS
+            # times, in which case the delivery is persistently incomplete
+            # rather than transient, and the job is dead-lettered instead
+            # of retried forever.
+            store.set_job_state(
+                job["job_id"],
+                "failed" if attempts > MAX_JOB_ATTEMPTS else "running",
+            )
 
     if updates:
         merged = merge_entries(entries, updates)

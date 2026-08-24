@@ -4,7 +4,7 @@ import pytest
 from dhvani.backends.async_base import SyncAsyncAdapter
 from dhvani.escalate import escalate
 from dhvani.pipeline import TrackEntry
-from dhvani.reconcile import reconcile
+from dhvani.reconcile import MAX_JOB_ATTEMPTS, reconcile
 from dhvani.segmenter import Segment
 from dhvani.store import Store
 from dhvani.track import entries_to_json, entries_from_json
@@ -296,3 +296,120 @@ def test_reconcile_ignores_a_foreign_job_even_at_the_same_version(store):
     reconcile("vid2", backend, store)
     assert polled == [job2]
     assert job1 not in polled
+
+
+# --- I6: a poisoned job must not starve every other job forever ---
+
+class RaisingForOneJobBackend:
+    """Wraps a real AsyncBackend so poll() raises for one specific job_id
+    and behaves normally for every other job. Models a single permanently
+    broken job (TransientError, JobNotFound, ...) that must not abort the
+    whole reconcile() pass.
+    """
+
+    def __init__(self, inner, bad_job_id):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+        self.bad_job_id = bad_job_id
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        if job_id == self.bad_job_id:
+            raise RuntimeError("injected poll failure")
+        return self.inner.poll(job_id)
+
+
+def test_a_poisoned_job_does_not_starve_other_open_jobs(store):
+    """reconcile() has no per-job exception isolation before the fix: an
+    unguarded backend.poll() that raises for one job propagates out of
+    reconcile() entirely, abandoning the whole pass. Because open_jobs()
+    is ORDER BY job_id, a permanently-failing job whose id sorts first
+    starves every other job on that backend indefinitely -- reconcile()
+    never even reaches them. This must fail before the fix: reconcile()
+    raises RuntimeError instead of returning.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync())
+
+    job_a = inner.submit([SEGMENTS[ENTRIES[0].segment_id]])
+    job_b = inner.submit([SEGMENTS[ENTRIES[1].segment_id]])
+    store.put_job(job_a, inner.name, inner.variant_key,
+                  [ENTRIES[0].segment_id], "vid1")
+    store.put_job(job_b, inner.name, inner.variant_key,
+                  [ENTRIES[1].segment_id], "vid1")
+
+    # Poison whichever job sorts FIRST -- that's the ordering open_jobs()
+    # actually produces, and the one that starved the queue before the fix.
+    bad_job_id, good_job_id = sorted([job_a, job_b])
+    good_segment_id = (ENTRIES[1].segment_id if good_job_id == job_b
+                       else ENTRIES[0].segment_id)
+
+    backend = RaisingForOneJobBackend(inner, bad_job_id)
+
+    version = reconcile("vid1", backend, store)  # must not raise
+
+    assert store.get_job(good_job_id)["state"] == "done"
+    assert store.get_job(bad_job_id)["state"] == "running"
+    merged = entries_from_json(store.get_track("vid1", version)["content_json"])
+    good_entry = next(e for e in merged if e.segment_id == good_segment_id)
+    assert good_entry.text == "escalated"
+
+
+class AlwaysRaisingBackend:
+    """poll() raises on every single call, for every job. Models a
+    permanently broken job -- a worker that crashed, a queue partition
+    that will never come back -- as opposed to a transient fault that
+    eventually clears.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.name = inner.name
+        self.variant_key = inner.variant_key
+
+    def cost_per_call(self, segment):
+        return self.inner.cost_per_call(segment)
+
+    def submit(self, segments):
+        return self.inner.submit(segments)
+
+    def poll(self, job_id):
+        raise RuntimeError("injected permanent poll failure")
+
+
+def test_a_permanently_failing_job_is_dead_lettered_after_max_attempts(store):
+    """After MAX_JOB_ATTEMPTS failed attempts, bump_job_attempts()'s return
+    value -- previously discarded entirely -- must be used to dead-letter
+    the job: state becomes "failed" and it disappears from open_jobs(), so
+    it stops being polled (and stops starving the queue) on every future
+    pass. Assert the exact attempt at which this happens, not just that it
+    eventually does.
+    """
+    _seed_v1(store)
+    inner = SyncAsyncAdapter(StubSync())
+    batch = [SEGMENTS[e.segment_id] for e in ENTRIES]
+    job_id = inner.submit(batch)
+    store.put_job(job_id, inner.name, inner.variant_key,
+                  [s.segment_id for s in batch], "vid1")
+
+    backend = AlwaysRaisingBackend(inner)
+
+    for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
+        reconcile("vid1", backend, store)
+        job = store.get_job(job_id)
+        assert job["attempts"] == attempt
+        assert job["state"] == "running"
+        assert job_id in [j["job_id"] for j in store.open_jobs("vid1")]
+
+    # One more failing attempt pushes attempts strictly past MAX_JOB_ATTEMPTS.
+    reconcile("vid1", backend, store)
+    job = store.get_job(job_id)
+    assert job["attempts"] == MAX_JOB_ATTEMPTS + 1
+    assert job["state"] == "failed"
+    assert job_id not in [j["job_id"] for j in store.open_jobs("vid1")]

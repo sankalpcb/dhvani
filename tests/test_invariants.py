@@ -122,13 +122,26 @@ def test_i1_no_segment_is_ever_lost_or_duplicated(store, faults):
 
 @pytest.mark.parametrize("faults", [("timeout",), ("rate_limit",), ("server_error",)])
 def test_i1_holds_when_every_poll_fails(store, faults):
-    """A backend that never succeeds must leave the track intact, not corrupt."""
+    """A backend that never succeeds must leave the track intact, not corrupt.
+
+    Adjusted for I6 (dead-lettering, fix round: reconcile per-job isolation):
+    these faults raise on EVERY poll, so before dead-lettering existed the
+    job could never settle and this asserted `not converged` -- _drain()
+    ran out of passes with the job stuck "running" forever. reconcile() now
+    catches a raising poll() per job (instead of letting it propagate and
+    abandon the whole pass) and, once bump_job_attempts() exceeds
+    MAX_JOB_ATTEMPTS, dead-letters the job: state -> "failed", which drops
+    it out of open_jobs(). That satisfies _drain()'s convergence check (no
+    more open jobs for this backend), so `converged` is now True -- but via
+    permanent failure, not success. Assert the job actually reached
+    "failed" (not "done") and that the track was never touched, since no
+    result was ever merged.
+    """
     backend = ChaosBackend(SyncAsyncAdapter(StubSync()), faults=faults, seed=5)
-    escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
+    job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version, converged = _drain(backend, store)
-    # These faults raise on EVERY poll, so the job can never settle. Say so
-    # out loud: silence from _drain() used to be the only evidence either way.
-    assert not converged
+    assert converged
+    assert store.get_job(job_id)["state"] == "failed"
     entries = _track(store, version)
     assert [e.text for e in entries] == ["raw"] * N
 
@@ -268,9 +281,17 @@ def test_i1_holds_under_a_permanently_partial_backend(store):
     backend = PermanentlyPartialBackend(SyncAsyncAdapter(StubSync()))
     job_id = escalate("vid1", ENTRIES, SEGMENTS, backend, store, TABLE, 10.0)
     version, converged = _drain(backend, store, max_passes=20)
-    # This backend can never deliver a job's full set, so the drain must run
-    # out of passes rather than settle -- assert that rather than infer it.
-    assert not converged
+    # Adjusted for I6 (dead-lettering, fix round: reconcile per-job
+    # isolation): this backend can never deliver a job's full set, so
+    # before dead-lettering existed the job stayed "running" forever and
+    # the drain ran out of passes without converging. reconcile() now
+    # counts a persistently-incomplete delivery the same way it counts a
+    # raising poll(): once bump_job_attempts() exceeds MAX_JOB_ATTEMPTS,
+    # the job is dead-lettered (state -> "failed"), which drops it out of
+    # open_jobs() -- satisfying _drain()'s convergence check. So
+    # `converged` is now True, but by giving up on the job, not by it
+    # completing.
+    assert converged
     entries = _track(store, version)
 
     # I1: every segment appears exactly once, nothing lost or duplicated.
@@ -280,11 +301,11 @@ def test_i1_holds_under_a_permanently_partial_backend(store):
     assert sorted(ids) == sorted(SEGMENTS)
 
     # The job can never cover all its registered segment_ids, so it must
-    # never be falsely marked done -- it stays "running" and still shows
-    # up in open_jobs() for a future retry (or resubmission) to find.
+    # never be falsely marked done -- it is dead-lettered ("failed")
+    # instead and no longer shows up in open_jobs() for further retry.
     job = store.get_job(job_id)
-    assert job["state"] == "running"
-    assert job_id in {j["job_id"] for j in store.open_jobs()}
+    assert job["state"] == "failed"
+    assert job_id not in {j["job_id"] for j in store.open_jobs()}
 
     # The segments that were never delivered keep their original Tier 0
     # text/risk/band untouched -- degrade safely, don't blank or corrupt.

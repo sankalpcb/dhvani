@@ -118,10 +118,15 @@ def test_cost_rounds_up_to_the_billing_increment():
     the USD 20 ceiling before every live call, so understating it would
     let real spend breach the ceiling while the ledger still reads under
     budget. This is the whole point of the fix."""
+    # Sub-increment means shorter than BILLING_INCREMENT_SEC, so this
+    # duration is derived from the constant rather than hardcoded. It was
+    # 2000ms, which stopped being sub-increment when the increment was
+    # corrected from 15s to the 1s V2 actually bills.
+    sub_increment_ms = max(1, (BILLING_INCREMENT_SEC * 1000) // 2)
     b = Tier1Chirp(client=StubClient())
-    sub_increment_cost = b.cost_per_call(_seg(2000))
+    sub_increment_cost = b.cost_per_call(_seg(sub_increment_ms))
     full_increment_cost = b.cost_per_call(_seg(BILLING_INCREMENT_SEC * 1000))
-    exact_duration_cost = USD_PER_MIN_DYNAMIC_BATCH * (2000 / 60000.0)
+    exact_duration_cost = USD_PER_MIN_DYNAMIC_BATCH * (sub_increment_ms / 60000.0)
 
     assert sub_increment_cost == pytest.approx(full_increment_cost)
     assert sub_increment_cost == pytest.approx(
@@ -204,3 +209,37 @@ def test_recognizer_path_fails_closed_without_project_when_empty(monkeypatch):
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     with pytest.raises(RuntimeError):
         mod._recognizer_path("")
+
+
+# --- the documented V2 billing model, replacing an assumed one ---
+
+def test_billing_increment_matches_the_published_v2_policy():
+    """BILLING_INCREMENT_SEC was 15, carried as an explicitly UNVERIFIED
+    guess whose docstring claimed only real billing line items could settle
+    it. They could not have: granularity is published pricing policy.
+
+    Speech-to-Text V2 rounds each request up to the nearest 1 second. The
+    15-second increment belongs to Speech-to-Text ON-PREM, a different
+    product. Dhvani calls V2 (google.cloud.speech_v2.SpeechClient), so 15
+    was simply the wrong SKU's number.
+    """
+    assert BILLING_INCREMENT_SEC == 1
+
+
+def test_dynamic_batch_rate_is_75_percent_below_standard():
+    """USD_PER_MIN_DYNAMIC_BATCH was 0.003, taken from the brief. Google
+    documents Dynamic Batch as 75% below the Standard tier, and Standard is
+    $0.016/min, which puts it at $0.004. The old figure under-priced every
+    call by 25% -- the dangerous direction, since cost_per_call feeds the
+    ceiling check that runs BEFORE each paid call."""
+    assert USD_PER_MIN_DYNAMIC_BATCH == pytest.approx(0.004)
+    assert USD_PER_MIN_DYNAMIC_BATCH == pytest.approx(USD_PER_MIN_STANDARD * 0.25)
+
+
+def test_a_seven_second_segment_is_not_billed_as_fifteen():
+    """The practical consequence, at the mean segment length of the real
+    calibration run: the old constant more than doubled every estimate."""
+    b = Tier1Chirp(client=StubClient())
+    seven = b.cost_per_call(_seg(7000))
+    assert seven == pytest.approx(USD_PER_MIN_DYNAMIC_BATCH * 7 / 60.0)
+    assert seven < USD_PER_MIN_DYNAMIC_BATCH * 15 / 60.0

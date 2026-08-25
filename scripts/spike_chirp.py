@@ -1,9 +1,10 @@
 """Day-one spike: does Chirp 3 accept the dynamic-batch processing strategy?
 
 Spec §14 risk 2. This determines the commercial rate used by Tier 1: dynamic
-batch is $0.003/min versus $0.016/min standard, a 5.3x difference deciding
+batch is $0.004/min versus $0.016/min standard, a 4x difference deciding
 whether the benchmark costs roughly $2.70 or roughly $14.40. It also probes
-the billing granularity behind BILLING_INCREMENT_SEC, which is currently an
+the DYNAMIC_BATCHING strategy. (BILLING_INCREMENT_SEC no longer needs a spike:
+Speech-to-Text V2 rounds to 1s per Google's published pricing. It was an
 unverified conservative guess in dhvani/backends/tier1_chirp.py.
 
 Reads its configuration from the environment so nothing has to be hand-edited:
@@ -74,7 +75,7 @@ def main() -> int:
 
     print()
     if dynamic:
-        print("RESULT: dynamic batch supported — USD_PER_MIN_DYNAMIC_BATCH = 0.003 stands.")
+        print("RESULT: dynamic batch supported — USD_PER_MIN_DYNAMIC_BATCH = 0.004 stands.")
         print("        Benchmark cost stays ~$2.70.")
     else:
         print("RESULT: dynamic batch NOT supported for chirp_3.")

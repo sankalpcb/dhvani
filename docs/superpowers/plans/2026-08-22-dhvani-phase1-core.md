@@ -2154,7 +2154,7 @@ the asynchronous dynamic-batch path (spec §7).
 - Consumes: `dhvani.backends.base.Backend`
 - Produces:
   - `dhvani.backends.tier1_chirp.Tier1Chirp(client=None, lang: str = "hi-IN", recognizer: str = "")` implementing `Backend`
-  - `dhvani.backends.tier1_chirp.USD_PER_MIN_DYNAMIC_BATCH: float = 0.003`
+  - `dhvani.backends.tier1_chirp.USD_PER_MIN_DYNAMIC_BATCH: float = 0.004`
   - `dhvani.backends.tier1_chirp.USD_PER_MIN_STANDARD: float = 0.016`
 
 - [ ] **Step 1: Run the day-one spike (spec §14 risk)**
@@ -2162,6 +2162,12 @@ the asynchronous dynamic-batch path (spec §7).
 Confirm Chirp 3 supports the dynamic-batch processing strategy. If it does not, set
 `USD_PER_MIN_DYNAMIC_BATCH = USD_PER_MIN_STANDARD` and note that the benchmark budget rises
 from roughly $2.70 to roughly $14.40 — still inside the $20 ceiling, but with no margin.
+
+**Superseded 2026-08-25.** Dynamic batch was confirmed supported, so the fallback never
+applied. Both pricing constants above were nonetheless wrong and are corrected in the code:
+the rate is $0.004/min (75% below Standard's $0.016), and V2 bills rounded up to **1 second**
+— 15s is the Speech-to-Text On-Prem increment, a different product. At the measured 7.1s mean
+segment, a 3000-utterance benchmark costs about **$1.60**, not $2.70.
 
 ```python
 # scripts/spike_chirp.py
@@ -2277,14 +2283,14 @@ Rates verified 2026-08-21. If the Task 12 spike shows dynamic batching is
 unsupported for Chirp 3, set USD_PER_MIN_DYNAMIC_BATCH = USD_PER_MIN_STANDARD.
 """
 
-USD_PER_MIN_DYNAMIC_BATCH = 0.003
+USD_PER_MIN_DYNAMIC_BATCH = 0.004
 USD_PER_MIN_STANDARD = 0.016
 
 # Google STT has historically billed in whole 15s increments, rounded up per
 # request. UNVERIFIED (spike 2 blocked). cost_per_call() rounds duration UP to
 # this before pricing: an overstated cost fails safe, an understated one lets
 # real spend breach the USD 20 ceiling while the ledger still reads under budget.
-BILLING_INCREMENT_SEC = 15
+BILLING_INCREMENT_SEC = 1
 
 
 class Tier1Chirp:

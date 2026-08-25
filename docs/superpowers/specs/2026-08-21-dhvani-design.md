@@ -142,7 +142,7 @@ audio
   ├───────────── risk < tau_ship ─────────────────────────┐
   │                                                       │
   ▼                                                       │
-┌─────────────┐  Chirp 3 dynamic batch, $0.003/min        │
+┌─────────────┐  Chirp 2 dynamic batch, $0.004/min        │
 │  asr_tier1  │  ASYNC — up to 24h turnaround             │
 └─────────────┘                                           │
   │                                                       │
@@ -430,7 +430,11 @@ Consequence: a reviewer can clone the repo and get a green suite with zero setup
 **Projected total: ~$10-13.** After the first pass everything is fixtured; re-runs cost $0.
 
 **Rates and gotchas (verified 2026-08-21):**
-- Speech-to-Text v2 **dynamic batch: $0.003/min** (24h turnaround). Standard tier is
+- Speech-to-Text v2 **dynamic batch: $0.004/min** (24h turnaround), i.e. 75% below
+  Standard, and billed **rounded up to the nearest 1 second** (the 15s increment
+  belongs to Speech-to-Text On-Prem, a different product). Corrected 2026-08-25
+  against Google's published pricing; this brief originally said $0.003/min.
+  Standard tier is
   $0.016/min — do not use it for benchmarking.
 - Free tier: 60 STT minutes/month, permanent.
 - The $300 / 90-day trial credits **do** cover Speech-to-Text.
@@ -549,12 +553,21 @@ control is what stopped a false finding being recorded.
 
 **Q1: is DYNAMIC_BATCHING accepted? YES — CLOSED.**
 Confirmed accepted on `europe-west4/chirp_2` and `us-central1/chirp`, both with and without the
-strategy. `USD_PER_MIN_DYNAMIC_BATCH = 0.003` stands; the benchmark stays at roughly **$2.70**,
-not $14.40.
+strategy. The Standard-rate fallback never applied. (The rate itself was separately found wrong --
+see Q2 -- so the benchmark figure is now roughly **$1.60**, not the $2.70 recorded here.)
 
-**Q2: is `BILLING_INCREMENT_SEC = 15` real? STILL UNVERIFIED.**
-Cannot be answered by an API call — it needs actual billing line items, which take ~24h to
-appear in Cloud Billing export. The constant remains a deliberate conservative guess.
+**Q2: is `BILLING_INCREMENT_SEC = 15` real? ANSWERED 2026-08-25 — NO.**
+It was never a question for billing line items. Granularity is published pricing policy:
+**Speech-to-Text V2 rounds each request up to the nearest 1 second.** The 15s increment
+belongs to Speech-to-Text **On-Prem**, a different product; this project calls V2, so it had
+been applying the wrong SKU's rounding. Checking that also caught the per-minute rate: Dynamic
+Batch is documented as 75% below Standard's $0.016, i.e. **$0.004/min**, not the $0.003 this
+brief asserted.
+
+Net effect at the 7.1s mean segment measured in the first real calibration run: the 15s
+increment OVER-reserved about 2.1x while the rate UNDER-priced by 25%, so the two errors
+partially cancelled and nothing ever breached the ceiling. Both are corrected in
+`dhvani/backends/tier1_chirp.py`.
 
 **Unexpected finding: the model and location in our code were both wrong.**
 

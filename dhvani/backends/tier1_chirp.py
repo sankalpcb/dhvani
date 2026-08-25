@@ -6,15 +6,16 @@ replaces this with asynchronous dynamic-batch submission plus reconciliation
 
 Spec §14 risk 2 is CLOSED. scripts/spike_chirp.py ran against a real GCP
 project on 2026-08-24 (commit aeb09b5): DYNAMIC_BATCHING is ACCEPTED, on
-europe-west4/chirp_2 and us-central1/chirp. So USD_PER_MIN_DYNAMIC_BATCH
-stands and the benchmark stays near $2.70 rather than the ~$14.40 the
-standard rate would have cost. The contingency this paragraph used to
-describe -- fall back to USD_PER_MIN_STANDARD if the strategy is rejected
--- did not come to pass.
+europe-west4/chirp_2 and us-central1/chirp. The contingency this paragraph
+used to describe -- fall back to USD_PER_MIN_STANDARD if the strategy is
+rejected -- did not come to pass.
 
-What that run could NOT settle is the per-minute figure itself, which is
-still the brief's rate, and the billing granularity below: neither appears
-in an API response. Both need real billing line items.
+The pricing numbers themselves were settled separately, on 2026-08-25, and
+NOT the way this file long claimed. Both constants below were wrong, and
+both were checkable all along from Google's published pricing rather than
+from any invoice: the per-minute rate was 25% low, and the billing
+increment was the one belonging to Speech-to-Text ON-PREM rather than the
+V2 API this module actually calls. See each constant's docstring.
 
 This paragraph previously called the spike blocked on environment (no GCP
 project, no credentials, google-cloud-speech not installed). That was true
@@ -27,8 +28,17 @@ to BILLING_INCREMENT_SEC before pricing it -- see that constant's docstring.
 
 import os
 
-USD_PER_MIN_DYNAMIC_BATCH = 0.003
+USD_PER_MIN_DYNAMIC_BATCH = 0.004
+"""Dynamic Batch: documented as 75% below the Standard tier, so 0.25 x 0.016.
+
+Was 0.003, taken from the brief and never checked against Google's published
+pricing. That under-priced every call by 25% -- the dangerous direction,
+because cost_per_call() feeds the ceiling check that runs BEFORE each paid
+call, and an understated cost lets real spend pass a ledger that still reads
+under budget.
+"""
 USD_PER_MIN_STANDARD = 0.016
+"""Standard real-time/batch tier, the published list rate."""
 
 # Region and model, both settled by scripts/spike_chirp.py on 2026-08-24.
 #
@@ -44,30 +54,28 @@ USD_PER_MIN_STANDARD = 0.016
 SPEECH_LOCATION = os.environ.get("DHVANI_SPEECH_LOCATION", "europe-west4")
 SPEECH_MODEL = os.environ.get("DHVANI_SPEECH_MODEL", "chirp_2")
 
-BILLING_INCREMENT_SEC = 15
-"""Google Cloud Speech-to-Text has historically billed synchronous/batch
-recognize requests in whole increments of this many seconds, rounded up per
-request -- a 2-second segment is billed the same as a 15-second one.
+BILLING_INCREMENT_SEC = 1
+"""Speech-to-Text V2 rounds each request up to the nearest 1 second.
 
-UNVERIFIED -- and not for want of access. The spike DID run against a real
-GCP project (commit aeb09b5, 2026-08-24) and still could not settle this:
-billing granularity is not something an API response reports, it shows up
-in billing line items after the fact. This value must be confirmed against
-a real Google Cloud invoice before any conclusion is drawn from measured
-cost. The note here used to blame a missing environment (no project, no
-credentials, no google-cloud-speech); that was true once and is not the
-reason today.
+This was 15, carried as an explicitly UNVERIFIED guess whose docstring
+insisted only real Cloud Billing line items could settle it. That premise
+was wrong twice over. Billing granularity is published pricing policy, not a
+per-account fact, so no invoice was ever needed -- and 15 seconds is the
+increment for Speech-to-Text ON-PREM, a different product with its own SKU.
+Dhvani calls V2 (google.cloud.speech_v2.SpeechClient), so the code was
+applying the wrong product's rounding.
 
-Rounding up here is deliberate and conservative, not a guess dressed up as
-a fact: cost_per_call() feeds directly into Recorded's USD 20 ceiling check
-(dhvani/backends/base.py), which records spend BEFORE the paid call runs
-for exactly this reason -- an overstated cost fails safe, an understated
-one lets real spend breach the ceiling while the ledger still reads under
-budget. segmenter.segment() can produce segments well under 15s, and each
-segment is one paid Chirp call, so charging exact wall-clock duration would
-understate cost by up to 7x on short segments. Same principle as the
-record-spend-before-the-call ruling in base.py: when true granularity is
-unknown, round toward the number that keeps the ceiling honest.
+Direction of the error, since this file cares about that: 15s rounding
+OVER-reserved. At the 7.1s mean segment of the first real calibration run it
+more than doubled every estimate -- 2010 billed seconds where V2 charges
+939 -- so the USD 20 ceiling was quietly worth about USD 42 of real audio
+and every --confirm estimate overstated by the same factor. Safe, but not
+honest, and it partially masked the opposite error in
+USD_PER_MIN_DYNAMIC_BATCH above.
+
+Rounding up is still correct and still load-bearing: sub-second audio is
+billed as a whole second, and Recorded (backends/base.py) checks this exact
+number against the ceiling before every live call.
 """
 
 

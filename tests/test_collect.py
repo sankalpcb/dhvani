@@ -33,12 +33,16 @@ class StubTier0:
                 "signals": {"ctc_rnnt_disagreement": 0.4}}
 
 
-def _corpus(n=3, lang="hi-IN"):
-    rng = np.random.default_rng(0)
+def _corpus(n=3, lang="hi-IN", dataset_id="fake", seed=0):
+    """seed varies the AUDIO, so two corpora can hold genuinely different
+    utterances -- put_segment is INSERT OR IGNORE on the content-addressed
+    segment_id, so identical audio from two corpora is one row by design and
+    could not show a provenance difference."""
+    rng = np.random.default_rng(seed)
     return FakeCorpus([
         (0.3 * rng.standard_normal(32000), 16000, f"ref-{i}", lang, f"spk{i}", f"d{i}")
         for i in range(n)
-    ])
+    ], dataset_id=dataset_id)
 
 
 @pytest.fixture
@@ -51,6 +55,64 @@ def store(tmp_path):
 def pcm_dir(tmp_path):
     """Where phase 1 parks the audio phase 2 sends to Tier 1 inline."""
     return str(tmp_path / "pcm")
+
+
+def _source_of(store, segment_id):
+    row = store.conn.execute(
+        "SELECT source_id FROM segments WHERE segment_id = ?", (segment_id,)
+    ).fetchone()
+    return row["source_id"]
+
+
+def test_calibration_source_names_the_dataset_and_the_language():
+    """The label format, pinned. It is provenance for a human reading the
+    segments table, not a key -- nothing parses or queries it -- so it is
+    kept readable rather than sanitized or hashed."""
+    from dhvani.calibrate import calibration_source
+
+    assert (calibration_source("ai4bharat/IndicVoices", "kn-IN")
+            == "calib:ai4bharat/IndicVoices:kn-IN")
+
+
+def test_segments_record_which_corpus_they_came_from(store, pcm_dir):
+    """collect() labelled segments "calib:{lang}", which says which language
+    a row is but not which corpus produced it."""
+    out = collect(_corpus(1, dataset_id="ai4bharat/IndicVoices"),
+                  lambda lang: StubTier0(), store, ["hi-IN"], per_lang=1,
+                  pcm_cache_dir=pcm_dir)
+
+    source = _source_of(store, out[0]["segment_id"])
+    assert "ai4bharat/IndicVoices" in source, "must name the corpus"
+    assert "hi-IN" in source, "must still name the language"
+
+
+def test_two_corpora_in_one_db_stay_distinguishable(store, pcm_dir):
+    """The point of the change: collecting a second dataset into the same
+    --db must not produce rows indistinguishable from the first's."""
+    first = collect(_corpus(1, dataset_id="corpus-A", seed=1),
+                    lambda lang: StubTier0(), store, ["hi-IN"], per_lang=1,
+                    pcm_cache_dir=pcm_dir)
+    second = collect(_corpus(1, dataset_id="corpus-B", seed=2),
+                     lambda lang: StubTier0(), store, ["hi-IN"], per_lang=1,
+                     pcm_cache_dir=pcm_dir)
+
+    assert first[0]["segment_id"] != second[0]["segment_id"], "different audio"
+    assert (_source_of(store, first[0]["segment_id"])
+            != _source_of(store, second[0]["segment_id"]))
+
+
+def test_one_corpus_across_languages_still_separates_them(store, pcm_dir):
+    """Adding the dataset must not collapse the distinction that was
+    already there: two languages from ONE corpus stay separate rows."""
+    hi = collect(_corpus(1, lang="hi-IN", dataset_id="corpus-A", seed=1),
+                 lambda lang: StubTier0(lang), store, ["hi-IN"], per_lang=1,
+                 pcm_cache_dir=pcm_dir)
+    kn = collect(_corpus(1, lang="kn-IN", dataset_id="corpus-A", seed=2),
+                 lambda lang: StubTier0(lang), store, ["kn-IN"], per_lang=1,
+                 pcm_cache_dir=pcm_dir)
+
+    assert (_source_of(store, hi[0]["segment_id"])
+            != _source_of(store, kn[0]["segment_id"]))
 
 
 def test_collect_returns_one_scored_item_per_utterance(store, pcm_dir):

@@ -8,6 +8,11 @@ unchanged.
 IndicVoicesCorpus imports `datasets` lazily, inside stream(), so importing
 this module costs nothing and the test suite runs with the `data` extra
 absent (goal G5).
+
+A corpus is anything with stream(lang, limit) and a `dataset_id` string.
+dataset_id is identity, not decoration: calibrate.collect() writes it into
+each segment's source_id, so a second dataset collected into the same --db
+stays distinguishable from the first.
 """
 
 from dataclasses import dataclass
@@ -86,9 +91,13 @@ def disjoint_by(items, key: str) -> bool:
 class FakeCorpus:
     """In-memory corpus for tests. No download, no `datasets` dependency."""
 
-    def __init__(self, items):
+    def __init__(self, items, dataset_id: str = "fake"):
         # items: list of (raw_audio, src_rate, reference, lang, speaker_id, district)
         self._items = list(items)
+        # Part of the corpus protocol alongside stream(): collect() records
+        # it so the segments table says which corpus a row came from. The
+        # default is deliberately not a plausible dataset name.
+        self.dataset_id = dataset_id
 
     def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
         count = 0

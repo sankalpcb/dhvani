@@ -80,8 +80,8 @@ def test_escalation_fails_closed_at_the_ceiling(store):
     # The only candidate ever selected here is "a" (risk 0.65, bucket
     # "0.6-0.7", the sole key in TABLE); "b" (risk 0.05) has no matching
     # bucket, delta 0.0, and is excluded by plan()'s invariant I3. That
-    # single 3000ms segment costs cost_for_duration_ms(3000) == $0.00075
-    # (rounds up to the 15s billing increment at $0.003/min). Reserving
+    # single 3000ms segment is priced by cost_for_duration_ms(3000): V2
+    # bills rounded up to 1s at $0.004/min. Reserving
     # the brief's literal $19.999 first leaves $0.001 of headroom — more
     # than the batch actually costs — so it would NOT breach the ceiling
     # (19.999 + 0.00075 == 19.99975 <= 20.0, legally under the "boundary:

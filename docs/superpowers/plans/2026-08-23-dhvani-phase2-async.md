@@ -538,7 +538,7 @@ class StubSync:
         self.calls = 0
 
     def cost_per_call(self, segment):
-        return 0.003
+        return 0.004
 
     def transcribe(self, segment):
         self.calls += 1
@@ -594,7 +594,7 @@ def test_poll_on_unknown_job_raises():
 
 
 def test_cost_per_call_delegates_to_inner():
-    assert SyncAsyncAdapter(StubSync()).cost_per_call(_segs()[0]) == 0.003
+    assert SyncAsyncAdapter(StubSync()).cost_per_call(_segs()[0]) == 0.004
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

@@ -73,15 +73,22 @@ def test_variant_key_captures_everything_that_changes_the_output():
     assert base.variant_key != other_recognizer.variant_key
 
 
-def test_construction_with_no_client_succeeds_without_google_cloud_speech():
+def test_construction_with_no_client_succeeds():
     """G5 regression guard, mirroring Task 9's Tier0Conformer guard. A
     stranger who clones the repo and runs the offline replay workflow has
     no google-cloud-speech installed and no GCP credentials. Constructing
     Tier1Chirp() with no injected client must not import anything or touch
     the network -- only an actual transcribe() call is allowed to do that.
-    This project's own venv genuinely has no google-cloud-speech installed
-    (it lives behind the optional `cloud` extra), so this assertion not
-    raising is real evidence, not a simulated one."""
+
+    This test used to be named ..._without_google_cloud_speech and to claim
+    that this project's venv genuinely had none installed, so that the
+    assertion below was "real evidence, not a simulated one". The `cloud`
+    extra IS installed here now, and application default credentials exist
+    on this machine, so that evidence is gone: passing here no longer says
+    anything about the stranger's environment, only that construction is
+    cheap. The environment-independent guarantee is the next test's job --
+    it forces _default_client to blow up if reached, which holds whatever
+    is installed. Kept as a cheap smoke check, no longer as proof."""
     b = Tier1Chirp()
     assert b.lang == "hi-IN"
 

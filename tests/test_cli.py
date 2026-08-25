@@ -220,16 +220,47 @@ def _prepare(tmp_path, wav_path):
     return fixtures, delta_path, segments
 
 
-def test_cli_escalate_in_replay_mode_never_makes_a_live_call(tmp_path, capsys):
+def test_cli_escalate_in_replay_mode_never_makes_a_live_call(tmp_path, capsys,
+                                                             monkeypatch):
     """C2: cli.py built SyncAsyncAdapter(Tier1Chirp(...)) with no Recorded
     wrapper, and Recorded is the only enforcer of "replay never falls back
     to live" -- so --mode replay was ignored entirely for Tier 1.
 
-    This environment has no google-cloud-speech installed, so an actual
-    live call raises ModuleNotFoundError from _default_client(); with the
-    cloud extra installed it would instead be a real billed request. Either
-    way, a replay-mode command must never get there.
+    This docstring used to claim the environment had no google-cloud-speech
+    installed, and to lean on that as the reason a regression here would be
+    caught rather than billed. It is installed -- it lives behind the
+    `cloud` extra, and the extra is present -- and application default
+    credentials exist on this machine too. So the fallback the claim
+    described is gone in both halves: reaching the live path from here
+    would be a real billed request, not a ModuleNotFoundError.
+
+    The environment was never the right thing to depend on. Assert the
+    property instead: _default_client() is the single door to the billed
+    API, and a replay-mode command must never open it. Same tripwire the
+    calibrate side already uses, so this stays a valid regression guard
+    wherever it runs and whatever is installed.
     """
+    import dhvani.backends.tier1_chirp as tier1_mod
+
+    # The tripwire RECORDS rather than only raising, and is asserted after
+    # the run. Raising alone is not enough here and quietly proves nothing:
+    # reconcile() wraps each poll() in `except Exception` on purpose, so one
+    # failing job cannot abandon the whole pass -- which means it swallows a
+    # tripwire's AssertionError too, dead-letters the job, and lets main()
+    # return 0 with the track still the right length. A raise-only version
+    # of this test passes even with the C2 bug reintroduced. The flag
+    # survives that handler; the exception does not.
+    live_calls = []
+
+    def live_call_tripwire(*args, **kwargs):
+        live_calls.append(args)
+        raise AssertionError(
+            "replay mode reached _default_client() -- the next step is a "
+            "real billed Chirp request"
+        )
+
+    monkeypatch.setattr(tier1_mod, "_default_client", live_call_tripwire)
+
     wav_path = tmp_path / "clip.wav"
     fixtures, delta_path, segments = _prepare(tmp_path, wav_path)
 
@@ -243,9 +274,28 @@ def test_cli_escalate_in_replay_mode_never_makes_a_live_call(tmp_path, capsys):
         "--escalate", "--reconcile",
     ])
 
+    assert not live_calls, (
+        "replay mode opened the door to the billed Chirp API "
+        f"({len(live_calls)} call(s) to _default_client)"
+    )
     assert exit_code == 0
     track = json.loads(capsys.readouterr().out)
     assert len(track) == len(segments)
+    # Anti-vacuity: "never reached the live client" is trivially true of a
+    # run that escalated nothing, so prove the replay path really ran.
+    # Checked against the STORE, not against `track` above -- stdout is
+    # run()'s Tier 0 output and does not carry the escalation (the merged
+    # result lands in the store as a new track version), so asserting this
+    # on stdout would fail even though escalation succeeded.
+    from dhvani.store import Store as _Store
+    with _Store(str(tmp_path / "t.db")) as check:
+        version = check.latest_track_version("clip.wav")
+        assert version > 1, "reconcile() never advanced the track"
+        merged = json.loads(
+            check.get_track("clip.wav", version)["content_json"])
+        assert any(e["text"] == "escalated-by-chirp" for e in merged), (
+            "replay produced no escalated segments -- nothing was exercised"
+        )
 
 
 def test_cli_replay_escalation_reserves_no_money(tmp_path, capsys):

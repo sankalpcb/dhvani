@@ -1,0 +1,7 @@
+{
+  "signals": {
+    "ctc_rnnt_disagreement": 1.0,
+    "mean_neg_logprob": 0.0
+  },
+  "text": "\u0908"
+}

@@ -10,3 +10,9 @@ __pycache__/
 # ...except the committed demo audio, which a clean clone cannot regenerate:
 # replay fixtures are named for the SHA256 of this exact PCM.
 !samples/*.wav
+
+# Build outputs of `make track` / `make bench` -- regenerable from committed
+# audio and fixtures. results/scored.json is deliberately NOT here: it is
+# measured calibration data that cost real money and hours to produce.
+results/track.json
+results/report.md

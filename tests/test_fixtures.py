@@ -47,6 +47,21 @@ def _tier0_dir():
         Tier0Conformer(lang="hi").variant_key)
 
 
+def _committed_samples():
+    """Audio committed under samples/ -- real speech a clone cannot regenerate.
+
+    *.wav is gitignored with a `!samples/*.wav` exception precisely so these
+    can ship: a fixture is keyed to the SHA256 of the audio, so a substitute
+    the reader generates locally would not match.
+    """
+    return sorted((ROOT / "samples").glob("*.wav"))
+
+
+def _segments_of(path):
+    samples, rate = sf.read(str(path))
+    return split(normalize(samples, rate))
+
+
 def _regenerated_segments(tmp_path):
     wav = tmp_path / "sample.wav"
     _generator().write_sample(str(wav))
@@ -90,3 +105,41 @@ def test_the_committed_fixtures_are_shaped_like_backend_output(tmp_path):
         assert isinstance(payload["signals"], dict)
         for name, value in payload["signals"].items():
             assert isinstance(value, (int, float)), (name, value)
+
+
+def test_there_is_committed_demo_audio():
+    """Anti-vacuity: the two tests below iterate over samples/, and an empty
+    directory would satisfy both while `make track` fails on a missing file."""
+    assert _committed_samples(), "no committed audio under samples/"
+
+
+def test_every_segment_of_every_committed_sample_has_a_tier0_fixture():
+    """`make track` defaults to committed audio, so its fixtures must ship
+    with it or a clean clone cannot run the workflow at all."""
+    missing = []
+    for wav in _committed_samples():
+        for seg in _segments_of(wav):
+            if not (_tier0_dir() / f"{seg.segment_id}.json").exists():
+                missing.append(f"{wav.name} -> {seg.segment_id}")
+    assert not missing, (
+        "committed audio has segments with no committed Tier 0 fixture, so "
+        "`make track` cannot run offline from a clean clone:\n  "
+        + "\n  ".join(missing)
+        + f"\nRe-record with `dhvani <wav> --mode record --fixtures fixtures`."
+    )
+
+
+def test_every_committed_sample_is_attributed():
+    """The audio under samples/ is third-party and CC-BY-4.0, which requires
+    crediting the source and indicating modifications. Committing a clip
+    without naming it in ATTRIBUTION.md would be a licence violation, and it
+    is the kind of omission nothing else would catch."""
+    notice = ROOT / "samples" / "ATTRIBUTION.md"
+    assert notice.exists(), "samples/ATTRIBUTION.md is missing"
+    text = notice.read_text(encoding="utf-8")
+
+    unattributed = [w.name for w in _committed_samples() if w.name not in text]
+    assert not unattributed, (
+        "committed audio not named in samples/ATTRIBUTION.md: "
+        f"{unattributed}. CC-BY-4.0 requires attribution for each work."
+    )

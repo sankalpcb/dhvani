@@ -31,6 +31,7 @@ from dhvani.audio import normalize
 from dhvani.backends.base import Recorded
 from dhvani.backends.tier0_conformer import Tier0Conformer
 from dhvani.config import POLICY_ID
+from dhvani.ids import source_id as make_source_id
 from dhvani.metrics import summarize
 from dhvani.pipeline import run
 from dhvani.segmenter import segment as split
@@ -75,7 +76,11 @@ def main(argv=None) -> int:
         tier0 = Recorded(
             Tier0Conformer(lang=args.lang), args.mode, args.fixtures, store
         )
-        entries = run(pcm, os.path.basename(args.audio), tier0, store,
+        # Content-addressed, not the bare basename: a/clip.wav and
+        # b/clip.wav are different videos and must not share a track
+        # history or a job namespace inside one --db. See ids.source_id.
+        source = make_source_id(os.path.basename(args.audio), pcm)
+        entries = run(pcm, source, tier0, store,
                       delta_table, args.budget, samples=samples)
         # Replaced below by the reconciled track when escalation runs.
         final_entries = entries
@@ -87,7 +92,6 @@ def main(argv=None) -> int:
             from dhvani.reconcile import reconcile as do_reconcile
             from dhvani.track import entries_from_json, entries_to_json
 
-            source = os.path.basename(args.audio)
             # Real Segments, not stubs: Tier1Chirp.transcribe() reads .pcm.
             segments = {s.segment_id: s for s in split(pcm)}
             # Recorded is the ONLY thing that enforces "replay never falls

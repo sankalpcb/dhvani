@@ -94,3 +94,72 @@ def test_variant_slug_does_not_collide_after_sanitizing():
     onto one path; the slug carries a digest of the unsanitized key so it
     cannot."""
     assert variant_slug("lang=hi/x") != variant_slug("lang=hi-x")
+
+
+# --- source_id: the basename collision ---
+
+def test_two_different_audios_with_the_same_basename_get_different_ids():
+    """The bug. dhvani/cli.py used os.path.basename(audio) as the source
+    identity, so a/clip.wav and b/clip.wav shared one track history and one
+    job namespace inside a single --db: escalating one could surface in the
+    other's output, and reconcile() polled across both."""
+    from dhvani.ids import source_id
+
+    one = normalize(_tone(freq=200.0), SAMPLE_RATE)
+    two = normalize(_tone(freq=880.0), SAMPLE_RATE)
+
+    assert source_id("clip.wav", one) != source_id("clip.wav", two)
+
+
+def test_the_same_audio_and_name_is_stable_across_directories():
+    """The id must depend on the audio and the name, never on where the
+    file happens to sit -- re-running the same clip from a different
+    working directory has to find its own track, not start a new one."""
+    from dhvani.ids import source_id
+
+    pcm = normalize(_tone(freq=200.0), SAMPLE_RATE)
+    assert source_id("clip.wav", pcm) == source_id("clip.wav", pcm.copy())
+
+
+def test_source_id_keeps_the_name_legible():
+    """Same tradeoff variant_slug() already makes: source_id lands in the
+    segments and jobs tables, and a reviewer reading that DB needs to see
+    which file a row belongs to. A bare digest would be unreadable."""
+    from dhvani.ids import source_id
+
+    pcm = normalize(_tone(), SAMPLE_RATE)
+    assert source_id("interview-01.wav", pcm).startswith("interview-01.wav")
+
+
+def test_source_id_sanitizes_and_caps_the_name():
+    """Names are attacker-adjacent input (they come off the filesystem) and
+    end up in a DB column, so they get the same treatment variant_slug
+    gives variant strings: sanitized, length-capped, digest appended."""
+    from dhvani.ids import source_id
+
+    pcm = normalize(_tone(), SAMPLE_RATE)
+    weird = source_id("../../etc/pa sswd?*.wav", pcm)
+
+    assert "/" not in weird and " " not in weird
+    assert ".." not in weird
+    assert len(weird) < 80
+
+
+def test_names_that_sanitize_alike_still_differ():
+    """Sanitizing is lossy, so two distinct names can collapse to the same
+    safe text. The digest covers the name as well as the audio, so they
+    still get different ids -- the same reason variant_slug digests the
+    UNsanitized string."""
+    from dhvani.ids import source_id
+
+    pcm = normalize(_tone(), SAMPLE_RATE)
+    assert source_id("a b.wav", pcm) != source_id("a/b.wav", pcm)
+
+
+def test_source_id_rejects_unnormalized_pcm():
+    """Inherited from segment_id: hashing float or stereo audio would make
+    the identity depend on decode details rather than on the samples."""
+    from dhvani.ids import source_id
+
+    with pytest.raises(ValueError):
+        source_id("clip.wav", _tone())

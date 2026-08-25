@@ -23,9 +23,9 @@ from dhvani.report_cli import main as report_main
 from dhvani.segmenter import segment as split
 
 
-def _write_wav(path, seconds=6.0):
+def _write_wav(path, seconds=6.0, freq=200.0):
     t = np.linspace(0, seconds, int(SAMPLE_RATE * seconds), endpoint=False)
-    x = 0.5 * np.sin(2 * np.pi * 200 * t)
+    x = 0.5 * np.sin(2 * np.pi * freq * t)
     sf.write(str(path), x, SAMPLE_RATE, subtype="PCM_16")
 
 
@@ -190,18 +190,23 @@ def test_cli_persists_the_track_to_out_path(tmp_path, capsys):
 ALL_BUCKETS = {f"{i/10:.1f}-{(i+1)/10:.1f}": 20.0 for i in range(10)}
 
 
-def _prepare(tmp_path, wav_path):
+def _prepare(tmp_path, wav_path, freq=200.0,
+             tier1_text="escalated-by-chirp"):
     """Write the wav plus tier0 AND tier1 fixtures for every segment.
+
+    freq and tier1_text exist so a test can build two DISTINGUISHABLE
+    sources under one fixtures tree; fixtures are keyed by segment_id, so
+    different audio cannot clash and the directories are shared.
 
     Returns (fixtures_dir, delta_table_path, segments).
     """
-    _write_wav(wav_path)
+    _write_wav(wav_path, freq=freq)
     samples, rate = sf.read(str(wav_path))
     segments = split(normalize(samples, rate))
 
     fixtures = tmp_path / "fixtures"
     tier0_dir = fixtures / "tier0" / variant_slug(Tier0Conformer(lang="hi").variant_key)
-    tier0_dir.mkdir(parents=True)
+    tier0_dir.mkdir(parents=True, exist_ok=True)
     for seg in segments:
         (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({
             "text": "नमस्ते world", "signals": {"ctc_rnnt_disagreement": 0.1},
@@ -209,10 +214,10 @@ def _prepare(tmp_path, wav_path):
 
     from dhvani.backends.tier1_chirp import Tier1Chirp
     tier1_dir = fixtures / "tier1" / variant_slug(Tier1Chirp(lang="hi-IN").variant_key)
-    tier1_dir.mkdir(parents=True)
+    tier1_dir.mkdir(parents=True, exist_ok=True)
     for seg in segments:
         (tier1_dir / f"{seg.segment_id}.json").write_text(json.dumps({
-            "text": "escalated-by-chirp", "signals": {},
+            "text": tier1_text, "signals": {},
         }))
 
     delta_path = tmp_path / "delta.json"
@@ -319,11 +324,17 @@ def test_cli_prints_the_reconciled_track_not_the_tier0_input(tmp_path, capsys):
     )
 
     # And it must be the SAME track the store ended on, not a lookalike
-    # rebuilt in the CLI.
+    # rebuilt in the CLI. The store is keyed by the content-addressed
+    # source id, not the bare basename -- see ids.source_id -- so derive it
+    # the way the CLI does rather than hardcoding "clip.wav".
+    from dhvani.ids import source_id as make_source_id
+    samples, rate = sf.read(str(wav_path))
+    source = make_source_id(wav_path.name, normalize(samples, rate))
+
     with Store(str(db)) as store:
-        version = store.latest_track_version("clip.wav")
+        version = store.latest_track_version(source)
         assert version > 1, "reconcile() never advanced the track"
-        stored = json.loads(store.get_track("clip.wav", version)["content_json"])
+        stored = json.loads(store.get_track(source, version)["content_json"])
     assert track == stored
 
 
@@ -405,6 +416,61 @@ def test_a_run_with_no_escalation_flags_prints_the_tier0_track(tmp_path, capsys)
     track = json.loads(capsys.readouterr().out)
     assert [e["text"] for e in track] == ["नमस्ते world"], (
         "a non-escalating run must print its own Tier 0 output"
+    )
+
+
+def test_two_files_with_the_same_basename_do_not_share_a_track(tmp_path, capsys):
+    """The basename collision, end to end.
+
+    source_id was os.path.basename(audio), so a/clip.wav and b/clip.wav
+    were ONE source inside a single --db. The second run found the first's
+    track already at v2 and so never wrote its own v1; reconcile() then
+    merged the second file's results into the FIRST file's entries, where
+    merge_entries() correctly ignored them as unknown segment_ids -- and
+    the CLI printed the first file's captions as if they were the second
+    file's. Two different videos, one of them silently answered with the
+    other's transcript.
+    """
+    from dhvani.store import Store
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    wav_one = tmp_path / "a" / "clip.wav"
+    wav_two = tmp_path / "b" / "clip.wav"
+
+    fixtures, delta_path, _ = _prepare(tmp_path, wav_one, freq=200.0,
+                                       tier1_text="escalated-A")
+    _prepare(tmp_path, wav_two, freq=880.0, tier1_text="escalated-B")
+
+    db = tmp_path / "t.db"
+
+    def run_one(wav):
+        assert main([
+            str(wav), "--db", str(db), "--mode", "replay",
+            "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+            "--budget", "10.0", "--escalate", "--reconcile",
+        ]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    first = run_one(wav_one)
+    second = run_one(wav_two)
+
+    assert [e["text"] for e in first] == ["escalated-A"]
+    assert [e["text"] for e in second] == ["escalated-B"], (
+        "the second file was answered with the first file's track"
+    )
+    # Different audio really is different segments, so this is not two
+    # names for one thing.
+    assert {e["segment_id"] for e in first} != {e["segment_id"] for e in second}
+
+    # And the store holds them as two separate sources, each with its own
+    # version history rather than one interleaved one.
+    with Store(str(db)) as store:
+        sources = [r["source_id"] for r in store.conn.execute(
+            "SELECT DISTINCT source_id FROM tracks").fetchall()]
+    assert len(sources) == 2, f"expected two distinct sources, got {sources}"
+    assert all(s.startswith("clip.wav") for s in sources), (
+        "the name must stay legible in the store"
     )
 
 

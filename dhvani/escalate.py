@@ -111,15 +111,30 @@ def escalate(source_id, entries, segments, backend, store, delta_table,
     if not chosen:
         return None
 
-    # Reserve the batch's summed cost in ONE atomic call before submitting,
-    # not once per candidate. A per-candidate loop can partially succeed
-    # and then raise on a later candidate, leaving spend reserved for a
-    # batch that was never submitted anywhere -- that money buys nothing
-    # and cannot be recovered. A single reserve_spend() call makes the
-    # failure atomic: if it raises, nothing was reserved and nothing was
-    # submitted.
+    # CHECK the batch against the ceiling; do not record it. The paid call
+    # has not happened yet -- SyncAsyncAdapter defers it to poll(), where
+    # Recorded.transcribe() reserves it for real, immediately before the
+    # request goes out.
+    #
+    # This used to be reserve_spend(), which double-charged every live
+    # call: escalate() reserved the batch and Recorded reserved it again
+    # at poll time, so one Chirp request appeared twice in the ledger and
+    # total_spend() -- the number the USD 20 ceiling is enforced against --
+    # read double. That is C3 exactly, which calibrate.escalate_selected
+    # already fixed the same way: the reservation belongs in Recorded,
+    # the only layer that knows whether a call is actually paid (in replay
+    # it is free, and cost_per_call is 0.0).
+    #
+    # Nothing caught it because no test drove escalate() THROUGH a poll
+    # with a live Recorded in the stack; asserting spend straight after
+    # escalate() sees only the first of the two reservations.
+    #
+    # check_budget() is deliberately the non-atomic read-only predicate:
+    # it fails the batch closed before submit() creates a job that cannot
+    # be serviced, while the atomic guarantee stays where the money is
+    # actually committed.
     total_cost = sum(cand.cost_usd for cand in chosen)
-    store.reserve_spend(backend.name, total_cost)
+    store.check_budget(total_cost)
 
     batch = [segments[c.segment_id] for c in chosen]
 

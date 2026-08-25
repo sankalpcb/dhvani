@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "PROVENANCE": "ILLUSTRATIVE — NOT MEASUREMENT. Hand-written so the async escalate/reconcile path can be demonstrated offline.",
+    "why": "The real measured table is ./delta_table.json, and every one of its deltas is NEGATIVE: Tier 1 (Chirp 2) transcribes this corpus worse than Tier 0, so the router correctly refuses to escalate anything. That is the honest result, but it means nothing exercises the Phase 2 machinery. This file supplies a positive delta purely so `--escalate --reconcile` has something to do.",
+    "do_not": "Never point a real run at this file. It asserts an improvement that was not measured and, at the time of writing, is contradicted by the measurement.",
+    "measured_at": null,
+    "policy_id": "p1-2026-08-22"
+  },
+  "tier1": {
+    "0.0-0.1": 12.0
+  }
+}

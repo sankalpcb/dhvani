@@ -790,7 +790,7 @@ def test_low_risk_segments_are_not_escalated(store):
     assert "b" * 64 not in store.get_job(job_id)["segment_ids"]
 
 
-def test_spend_is_reserved_before_submission(store):
+def test_spend_lands_when_the_call_happens_not_when_it_is_planned(store):
     escalate(_entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
              store, TABLE, budget_usd=10.0)
     assert store.total_spend() > 0.0

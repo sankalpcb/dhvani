@@ -143,3 +143,65 @@ def test_every_committed_sample_is_attributed():
         "committed audio not named in samples/ATTRIBUTION.md: "
         f"{unattributed}. CC-BY-4.0 requires attribution for each work."
     )
+
+
+# --- the async escalation demo must stay runnable offline ---
+
+def test_the_demo_delta_table_is_labelled_as_not_measurement():
+    """samples/demo-delta-table.json asserts an improvement that was never
+    measured -- and is in fact contradicted by the real one, whose every
+    delta is negative. A reader who mistakes it for measurement draws the
+    opposite conclusion from the truth, so the label is load-bearing."""
+    table = json.loads(
+        (ROOT / "samples" / "demo-delta-table.json").read_text(encoding="utf-8"))
+    meta = table.get("meta", {})
+    assert meta.get("measured_at") is None, "a demo table must claim no measurement date"
+    blob = json.dumps(meta).upper()
+    assert "ILLUSTRATIVE" in blob and "NOT MEASUREMENT" in blob
+    assert any(v > 0 for v in table["tier1"].values()), (
+        "the demo table exists to make escalation happen; it needs a positive delta"
+    )
+
+
+def test_the_measured_table_is_not_the_demo_table():
+    """Guard against the demo file ever being copied over the real one."""
+    measured = json.loads((ROOT / "delta_table.json").read_text(encoding="utf-8"))
+    assert measured["meta"]["measured_at"], "the real table must carry a measurement date"
+    assert all(v < 0 for v in measured["tier1"].values()), (
+        "as measured, every Tier 1 delta is negative; if this changed, the "
+        "table was regenerated and the project's headline finding moved"
+    )
+
+
+def test_escalation_replays_offline_with_the_committed_fixtures(tmp_path, capsys):
+    """The Phase 2 machinery -- plan, submit, poll, reconcile, merge -- is
+    the most interesting engineering in the repo and was undemonstrable: no
+    Tier 1 fixture shipped, so `--escalate --reconcile` could not run
+    without credentials. This drives it end to end with no model, no
+    network and no spend."""
+    from dhvani.cli import main
+    from dhvani.store import Store
+
+    db = tmp_path / "demo.db"
+    assert main([
+        str(ROOT / "samples" / "fleurs-hi-12091698556182716328.wav"),
+        "--db", str(db), "--mode", "replay",
+        "--fixtures", str(ROOT / "fixtures"),
+        "--delta-table", str(ROOT / "samples" / "demo-delta-table.json"),
+        "--budget", "1.0", "--escalate", "--reconcile",
+    ]) == 0
+
+    track = json.loads(capsys.readouterr().out)
+    assert track, "no track printed"
+    with Store(str(db)) as store:
+        assert store.total_spend() == 0.0, "replay must never charge"
+    # The printed track is the RECONCILED one, so it carries Tier 1's text.
+    # Tier 0 and Tier 1 disagree on this clip only in orthography
+    # (कुतूहल/कुतुहल, गाँव/गांव), which is the normalization mismatch that
+    # drags the measured delta negative -- so compare against the fixture
+    # rather than hardcoding either spelling.
+    tier1_dir = ROOT / "fixtures" / "tier1"
+    recorded = json.loads(next(tier1_dir.rglob("*.json")).read_text(encoding="utf-8"))
+    assert track[0]["text"] == recorded["text"], (
+        "the reconciled track must carry the Tier 1 result, not the Tier 0 input"
+    )

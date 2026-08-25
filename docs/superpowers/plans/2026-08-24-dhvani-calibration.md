@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Kept honest by `tests/test_plan_docs.py`.** Every `def` and `class` this
+> plan declares under a `# path/to/file.py` heading is checked against that
+> file's real signature on each test run, so the plan cannot quietly describe
+> an interface the code has moved on from. What is checked is names and
+> parameters. The code inside each block is still an ABBREVIATED proposal,
+> not a copy of the file, and the prose around it still records what was
+> planned rather than what shipped — read the source for the full story.
+
 **Goal:** Produce a measured `delta_table.json` — the lookup table the router needs to decide which segments are worth escalating — by transcribing real Indic speech with both tiers and measuring the toWER improvement per risk bucket.
 
 **Architecture:** Two decoupled phases. Phase 1 streams IndicVoices utterances, transcribes each locally with Tier 0, scores its risk, and persists everything content-addressed — slow and free. Phase 2 takes a stratified sample across all ten risk buckets, sends only those to Chirp in dynamic batch, and computes deltas — fast and paid. Every external dependency is injected, so the whole harness tests without a model, a cloud SDK, credentials, or a network.
@@ -28,47 +36,59 @@
 
 ```python
 # dhvani/store.py
-Store(path, timeout=30.0)                      # context manager; has a _migrate() pattern
-  put_segment(segment_id, source_id, t_start_ms, t_end_ms, lang_hint=None)
-  put_hypothesis(segment_id, tier, text, signals, cost_usd, variant_key="") -> bool
-  get_hypothesis(segment_id, tier, variant_key="") -> dict | None   # keys: text, signals, cost_usd
-  reserve_spend(tier, cost_usd)                # atomic; raises BudgetExceeded
-  total_spend() -> float
-BudgetExceeded(RuntimeError)
+class Store:  # context manager; has a _migrate() pattern
+    def __init__(self, path: str, timeout: float=30.0): ...
+    def put_segment(self, segment_id, source_id, t_start_ms, t_end_ms, lang_hint=None): ...
+    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd, variant_key: str='') -> bool: ...
+    def get_hypothesis(self, segment_id, tier, variant_key: str=''): ...
+    def reserve_spend(self, tier: str, cost_usd: float) -> None: ...  # atomic; raises BudgetExceeded
+    def total_spend(self) -> float: ...
+
+class BudgetExceeded(RuntimeError): ...
 
 # dhvani/ids.py
-segment_id(pcm: np.ndarray) -> str             # SHA256 of mono int16 PCM
+def segment_id(pcm: np.ndarray) -> str: ...  # SHA256 of mono int16 PCM
 
 # dhvani/audio.py
-normalize(samples: np.ndarray, src_rate: int) -> np.ndarray    # mono int16 @ 16kHz
+def normalize(samples: np.ndarray, src_rate: int) -> np.ndarray: ...  # mono int16 @ 16kHz
 
 # dhvani/segmenter.py
-Segment(segment_id, t_start_ms, t_end_ms, pcm)                 # frozen dataclass
+@dataclass(frozen=True)
+class Segment:
+    segment_id: str
+    t_start_ms: int
+    t_end_ms: int
+    pcm: np.ndarray = field(compare=False, repr=False)
 
 # dhvani/scorer.py
-extract(text: str, decoder_signals: dict, duration_ms: int) -> Features
-risk(f: Features) -> float
+def extract(text: str, decoder_signals: dict, duration_ms: int) -> Features: ...
+def risk(f: Features) -> float: ...
 
 # dhvani/router.py
-bucket_of(risk: float) -> str                  # "0.6-0.7"; clamps to [0,1]
-N_BUCKETS = 10
+def bucket_of(risk: float) -> str: ...  # "0.6-0.7"; clamps to [0,1]
+N_BUCKETS: int
 
 # dhvani/delta_table.py
-build(rows: list[dict]) -> dict                # rows: {risk, reference, tier0_text, tier1_text}
+def build(rows: list[dict]) -> dict: ...  # rows: {risk, reference, tier0_text, tier1_text}
 
 # dhvani/backends/base.py
-Recorded(inner, mode, fixture_dir, store=None) # mode in record|replay|live
+class Recorded:  # mode in record|replay|live
+    def __init__(self, inner: Backend, mode: Mode, fixture_dir: str, store=None): ...
 
 # dhvani/backends/tier0_conformer.py
-Tier0Conformer(model=None, lang="hi", model_id=MODEL_ID)   # .name="tier0", .variant_key
+class Tier0Conformer:  # .name="tier0", .variant_key
+    def __init__(self, model=None, lang: str='hi', model_id: str=MODEL_ID): ...
 
 # dhvani/backends/tier1_chirp.py
-Tier1Chirp(client=None, lang="hi-IN", recognizer="")       # .name="tier1", .variant_key
-  cost_per_call(segment) -> float
-cost_for_duration_ms(duration_ms: int) -> float            # THE single Tier 1 cost model
+class Tier1Chirp:  # .name="tier1", .variant_key
+    def __init__(self, client=None, lang: str='hi-IN', recognizer: str=''): ...
+    def cost_per_call(self, segment) -> float: ...
+
+def cost_for_duration_ms(duration_ms: int) -> float: ...  # THE single Tier 1 cost model
 
 # dhvani/config.py
-POLICY_ID, RISK_WEIGHTS
+POLICY_ID: str
+RISK_WEIGHTS: dict
 ```
 
 ---
@@ -382,7 +402,7 @@ def disjoint_by(items, key: str) -> bool:
 class FakeCorpus:
     """In-memory corpus for tests. No download, no `datasets` dependency."""
 
-    def __init__(self, items):
+    def __init__(self, items, dataset_id: str='fake'):
         # items: list of (raw_audio, src_rate, reference, lang, speaker_id, district)
         self._items = list(items)
 
@@ -623,7 +643,7 @@ class StubTier0:
     name = "tier0"
     variant_key = "tier0|hi|m"
 
-    def __init__(self):
+    def __init__(self, lang='hi'):
         self.calls = 0
 
     def cost_per_call(self, segment):
@@ -634,7 +654,7 @@ class StubTier0:
         return {"text": "नमस्ते world", "signals": {"ctc_rnnt_disagreement": 0.4}}
 
 
-def _corpus(n=3, lang="hi-IN"):
+def _corpus(n=3, lang='hi-IN', dataset_id='fake', seed=0):
     rng = np.random.default_rng(0)
     return FakeCorpus([
         (0.3 * rng.standard_normal(32000), 16000, f"ref-{i}", lang, f"spk{i}", f"d{i}")
@@ -648,20 +668,20 @@ def store(tmp_path):
         yield s
 
 
-def test_collect_returns_one_scored_item_per_utterance(store):
+def test_collect_returns_one_scored_item_per_utterance(store, pcm_dir):
     out = collect(_corpus(3), StubTier0(), store, ["hi-IN"], per_lang=3)
     assert len(out) == 3
     assert all(0.0 <= s["risk"] <= 1.0 for s in out)
 
 
-def test_collect_persists_reference_and_hypothesis(store):
+def test_collect_persists_reference_and_hypothesis(store, pcm_dir):
     out = collect(_corpus(1), StubTier0(), store, ["hi-IN"], per_lang=1)
     sid = out[0]["segment_id"]
     assert store.get_reference(sid)["reference"] == "ref-0"
     assert store.get_hypothesis(sid, "tier0", "tier0|hi|m")["text"] == "नमस्ते world"
 
 
-def test_collect_is_resumable_and_does_not_retranscribe(store):
+def test_collect_is_resumable_and_does_not_retranscribe(store, pcm_dir):
     """The property that makes a multi-hour run survivable."""
     tier0 = StubTier0()
     collect(_corpus(3), tier0, store, ["hi-IN"], per_lang=3)
@@ -670,14 +690,14 @@ def test_collect_is_resumable_and_does_not_retranscribe(store):
     assert tier0.calls == first, "cached segments must not be re-transcribed"
 
 
-def test_collect_scores_identically_on_a_cached_rerun(store):
+def test_collect_scores_identically_on_a_cached_rerun(store, pcm_dir):
     tier0 = StubTier0()
     a = collect(_corpus(3), tier0, store, ["hi-IN"], per_lang=3)
     b = collect(_corpus(3), tier0, store, ["hi-IN"], per_lang=3)
     assert a == b
 
 
-def test_collect_spans_requested_languages(store):
+def test_collect_spans_requested_languages(store, pcm_dir):
     rng = np.random.default_rng(1)
     corpus = FakeCorpus([
         (0.3 * rng.standard_normal(32000), 16000, "h", "hi-IN", "s1", "d1"),
@@ -687,7 +707,7 @@ def test_collect_spans_requested_languages(store):
     assert {s["lang"] for s in out} == {"hi-IN", "kn-IN"}
 
 
-def test_collect_carries_duration_for_later_pricing(store):
+def test_collect_carries_duration_for_later_pricing(store, pcm_dir):
     out = collect(_corpus(1), StubTier0(), store, ["hi-IN"], per_lang=1)
     assert out[0]["duration_ms"] == 2000
 ```
@@ -783,10 +803,11 @@ from dhvani.calibrate import estimate_cost, escalate_selected, write_table
 from dhvani.segmenter import Segment
 from dhvani.store import Store, BudgetExceeded
 
-# NOTE: test_budget_failure_leaves_no_table_behind drives the CLI rather than
-# escalate_selected directly, because the "writes nothing" guarantee is a
-# property of the CLI's ordering (escalate before write_table), not of
-# escalate_selected alone.
+# NOTE: test_budget_failure_leaves_no_table_behind is intentionally omitted
+# here. It drives the CLI rather than escalate_selected directly, because
+# the "writes nothing" guarantee is a property of the CLI's ordering
+# (escalate before write_table), not of escalate_selected alone. It belongs
+# to Task 6, which is where dhvani.cli_calibrate is created.
 
 
 class StubTier1:
@@ -842,14 +863,14 @@ def test_escalate_produces_one_row_per_selected_segment(store):
     assert set(rows[0]) == {"risk", "reference", "tier0_text", "tier1_text"}
 
 
-def test_escalate_reserves_spend_before_calling(store):
+def test_escalate_reserves_spend_before_calling(store, tmp_path):
     sel = _selected(2)
     _seed_refs(store, sel)
     escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
     assert store.total_spend() > 0.0
 
 
-def test_rerunning_escalation_reserves_nothing_further(store):
+def test_rerunning_escalation_reserves_nothing_further(store, tmp_path):
     """Idempotent spend: cached tier1 hypotheses must not be re-paid."""
     sel = _selected(3)
     _seed_refs(store, sel)
@@ -859,7 +880,7 @@ def test_rerunning_escalation_reserves_nothing_further(store):
     assert store.total_spend() == pytest.approx(after_first)
 
 
-def test_escalation_fails_closed_at_the_ceiling(store):
+def test_escalation_fails_closed_at_the_ceiling(store, tmp_path):
     sel = _selected(3)
     _seed_refs(store, sel)
     store.reserve_spend("tier1", 20.0 - 0.0001)
@@ -873,28 +894,6 @@ def test_segments_missing_a_reference_are_skipped(store):
     _seed_refs(store, sel[:1])
     rows = escalate_selected(sel, StubTier1(), store, _segments(sel), "tier0|hi|m")
     assert len(rows) == 1
-
-
-def test_budget_failure_leaves_no_table_behind(tmp_path, capsys):
-    """Spec §6: a partial table is worse than none, because the router
-    would trust it. A run that breaches the ceiling must write nothing."""
-    from dhvani.cli_calibrate import main as calib_main
-
-    scored = [{"segment_id": f"s{i:04d}" + "0" * 59, "risk": 0.65,
-               "lang": "hi-IN", "duration_ms": 3000} for i in range(25)]
-    scored_path = tmp_path / "scored.json"
-    scored_path.write_text(json.dumps(scored))
-    out_path = tmp_path / "delta_table.json"
-
-    db = str(tmp_path / "t.db")
-    with Store(db) as store:
-        store.reserve_spend("tier1", 20.0 - 0.0001)   # leave no headroom
-
-    with pytest.raises(BudgetExceeded):
-        calib_main(["escalate", "--db", db, "--scored-in", str(scored_path),
-                    "--out", str(out_path), "--confirm"])
-
-    assert not out_path.exists(), "a breached ceiling must not leave a partial table"
 
 
 def test_write_table_records_provenance(tmp_path):
@@ -1073,7 +1072,7 @@ def test_escalate_subcommand_exists():
     assert exc.value.code == 0
 
 
-def _seed_scored(tmp_path, n=25):
+def _seed_scored(tmp_path, n=25, risk=0.65, prefix='s'):
     """A scored.json with one populated bucket, so escalate reaches its cost
     gate instead of exiting early on a missing input file."""
     scored = [{"segment_id": f"s{i:04d}" + "0" * 59, "risk": 0.65,

@@ -17,6 +17,12 @@ test:
 # Phase 1 Exit Criteria), so a clean clone has no audio to transcribe and no
 # measured deltas. bench is wired correctly and will fail loudly on the
 # missing input rather than reporting on a file nobody produced.
+# A clean clone has no sample.wav (*.wav is gitignored), so generate the one
+# the committed replay fixtures were recorded from. Deterministic: the
+# fixture filenames are hashes of exactly this signal.
+sample.wav:
+	uv run python scripts/make_sample_wav.py
+
 $(TRACK): $(AUDIO)
 	mkdir -p $(dir $(TRACK))
 	DHVANI_MODE=$(DHVANI_MODE) uv run dhvani $(AUDIO) --out $(TRACK)

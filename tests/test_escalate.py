@@ -96,10 +96,134 @@ def test_escalation_fails_closed_at_the_ceiling(store):
 
 
 def test_resubmitting_the_same_batch_is_idempotent(store):
+    """Re-escalating an unfinished track adds no work and no charge.
+
+    This used to assert `first == second`, which passed for the wrong
+    reason: job_id is content-addressed, so the second call re-entered
+    submit(), got the same id back, no-opped against INSERT OR IGNORE --
+    and reserved the batch's cost a second time on the way there. Equal
+    job ids were never the invariant; "the store gains nothing and the
+    ledger gains nothing" is, so assert that instead.
+    """
     backend = SyncAsyncAdapter(StubSync())
     first = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    spend_after_first = store.total_spend()
+
     second = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
-    assert first == second
+
+    assert second is None
+    assert store.total_spend() == pytest.approx(spend_after_first)
+    # The first job is untouched and still the only one: the resubmission
+    # neither duplicated it nor disturbed the batch reconcile() will poll.
+    assert [job["job_id"] for job in store.open_jobs()] == [first]
+    assert store.get_job(first)["segment_ids"] == ["a" * 64]
+
+
+def test_resubmitting_an_in_flight_batch_reserves_no_additional_spend(store):
+    """The double reservation carried forward from phase 3.
+
+    escalate() reserved the whole batch's cost before it knew whether the
+    batch was new. submit() is content-addressed and put_job() is INSERT OR
+    IGNORE, so re-running --escalate while a job is still outstanding
+    registers no new work -- but it charged for that work again, once per
+    invocation, with nothing bounding the total but the $20 ceiling itself.
+    """
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    after_first = store.total_spend()
+    assert after_first > 0.0, "the first escalation must really cost something"
+
+    escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert store.total_spend() == pytest.approx(after_first)
+
+
+def test_repeated_escalation_of_an_in_flight_batch_stays_bounded(store):
+    """"Unbounded across reconcile passes" stated as a test: the operator
+    loop is `--escalate --reconcile` re-run until the track converges, and
+    every pass before convergence used to add another full batch charge."""
+    backend = SyncAsyncAdapter(StubSync())
+    escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    after_first = store.total_spend()
+
+    for _ in range(10):
+        escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert store.total_spend() == pytest.approx(after_first)
+
+
+def test_resubmitting_a_delivered_batch_reserves_no_additional_spend(store):
+    """A settled segment is already paid for. Same backend, same variant,
+    same audio yields the same answer, so re-escalating it buys nothing --
+    exactly the rule pipeline.run() already applies to Tier 0 via
+    store.get_hypothesis() before calling tier0.transcribe()."""
+    backend = SyncAsyncAdapter(StubSync())
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    after_first = store.total_spend()
+
+    # Settle it the way reconcile() does: a hypothesis per segment under
+    # this backend's (name, variant_key), then the job out of open_jobs().
+    for segment_id in store.get_job(job_id)["segment_ids"]:
+        store.put_hypothesis(segment_id, backend.name, "escalated", {}, 0.0,
+                             backend.variant_key)
+    store.set_job_state(job_id, "done")
+
+    assert escalate("vid1", _entries(), SEGMENTS, backend, store,
+                    TABLE, 10.0) is None
+    assert store.total_spend() == pytest.approx(after_first)
+
+
+def test_re_escalating_a_dead_lettered_batch_makes_it_pollable_again(store):
+    """The last way escalate() could spend money and get nothing back.
+
+    Once the batch is deduplicated, a segment reaches submit() only if it
+    has no hypothesis and no open job -- which is exactly the state
+    reconcile() leaves behind when it dead-letters a job whose results
+    never arrived. Resubmitting that batch produces the same
+    content-addressed job_id, so put_job()'s INSERT OR IGNORE no-ops and
+    the row stays state="failed". open_jobs() never surfaces it again, so
+    reconcile() never polls it -- while reserve_spend() has already
+    charged for the call, and in live mode the call really was made.
+
+    put_job() returns False precisely to report this, and nobody looked.
+    An explicit re-escalation is an operator paying for another attempt,
+    so it must get one.
+    """
+    backend = SyncAsyncAdapter(StubSync())
+    per_segment_cost = cost_for_duration_ms(3000)
+    first = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    # How reconcile() leaves a job it has given up on: no segment of it was
+    # ever delivered, so no hypothesis exists for any of them.
+    store.set_job_state(first, "failed")
+    assert store.open_jobs() == [], "dead-lettered jobs drop out of the queue"
+
+    second = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    # Same segments means the same content-addressed id -- there is no
+    # second row to create, only the existing one to reopen.
+    assert second == first
+    assert [job["job_id"] for job in store.open_jobs()] == [first]
+    # The retry is genuinely paid for; this asserts it is not free, only
+    # that it now buys something.
+    assert store.total_spend() == pytest.approx(2 * per_segment_cost)
+
+
+def test_a_hypothesis_from_another_variant_does_not_suppress_escalation(store):
+    """The exclusion is keyed on (name, variant_key), not on segment_id
+    alone. A Tier 0 hypothesis for the same segment is a different tier and
+    must not be mistaken for Tier 1 work already done -- that would switch
+    escalation off entirely for every segment the pipeline has transcribed,
+    which is all of them."""
+    backend = SyncAsyncAdapter(StubSync())
+    for entry in _entries():
+        store.put_hypothesis(entry.segment_id, "tier0", "raw", {}, 0.0,
+                             "tier0|hi")
+
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert job_id is not None
+    assert store.total_spend() == pytest.approx(cost_for_duration_ms(3000))
 
 
 def _multi_entries():
@@ -162,6 +286,37 @@ def test_multi_candidate_reservation_is_atomic_on_failure(store):
 
     assert store.total_spend() == pytest.approx(total_before)
     assert store.open_jobs() == []
+
+
+def test_segments_still_missing_after_a_partial_delivery_are_re_escalated(store):
+    """The exclusion must not become a blanket "escalate once, ever".
+
+    A batch that came back incomplete leaves some segments with a Tier 1
+    hypothesis and some without. Once the job is off open_jobs(), a second
+    escalation must submit exactly the still-missing ones -- and charge for
+    exactly those, not for the whole batch again and not for nothing.
+    """
+    backend = SyncAsyncAdapter(StubSync())
+    per_segment_cost = cost_for_duration_ms(3000)
+
+    job_id = escalate("vid1", _multi_entries(), MULTI_SEGMENTS, backend, store,
+                      MULTI_TABLE, 10.0)
+    assert store.total_spend() == pytest.approx(3 * per_segment_cost)
+
+    # Exactly one of the three came back; the job is then dead-lettered by
+    # reconcile() after MAX_JOB_ATTEMPTS of persistently partial delivery.
+    delivered = store.get_job(job_id)["segment_ids"][0]
+    store.put_hypothesis(delivered, backend.name, "escalated", {}, 0.0,
+                         backend.variant_key)
+    store.set_job_state(job_id, "failed")
+
+    second = escalate("vid1", _multi_entries(), MULTI_SEGMENTS, backend, store,
+                      MULTI_TABLE, 10.0)
+
+    assert second is not None
+    assert delivered not in store.get_job(second)["segment_ids"]
+    assert len(store.get_job(second)["segment_ids"]) == 2
+    assert store.total_spend() == pytest.approx(5 * per_segment_cost)
 
 
 # --- C2: replay must cost nothing and must never reach a live backend ---

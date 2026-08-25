@@ -167,3 +167,84 @@ def test_indic_voices_corpus_small_dataset_no_error():
         assert len(items) == 10  # Should produce all 10 items without error
     finally:
         del sys.modules["datasets"]
+
+
+# --- the config name IndicVoices actually uses ---
+
+def test_language_tags_map_to_the_datasets_real_config_names():
+    """stream() derived its config as lang.split("-")[0], asking for "hi",
+    "kn", "ml". IndicVoices names its configs by full language: "hindi",
+    "kannada", "malayalam". Every collect run against the real corpus would
+    have failed on the first language, for all three the project targets.
+
+    The failure was also misdirecting: `datasets` reports a config it cannot
+    find on a gated repo as "is a gated dataset ... ask for access", so the
+    obvious reading was a permissions problem, not a wrong name.
+    """
+    from dhvani.corpus import indicvoices_config
+
+    assert indicvoices_config("hi-IN") == "hindi"
+    assert indicvoices_config("kn-IN") == "kannada"
+    assert indicvoices_config("ml-IN") == "malayalam"
+
+
+def test_every_default_language_is_mappable():
+    """The three languages the CLI ships as defaults must all resolve, or
+    `dhvani-calibrate collect` breaks with no arguments at all."""
+    from dhvani.cli_calibrate import DEFAULT_LANGS
+    from dhvani.corpus import indicvoices_config
+
+    for lang in DEFAULT_LANGS:
+        assert indicvoices_config(lang)
+
+
+def test_a_bare_language_code_works_too():
+    """Accept "hi" as well as "hi-IN": Tier0Conformer speaks the bare code
+    and the corpus speaks the full tag, and this has already been a bug once
+    (I6, one backend per language)."""
+    from dhvani.corpus import indicvoices_config
+
+    assert indicvoices_config("hi") == indicvoices_config("hi-IN")
+
+
+def test_an_unknown_language_says_what_is_available():
+    """Better than a downstream "gated dataset" error that sends the reader
+    to the permissions page for a typo."""
+    from dhvani.corpus import indicvoices_config
+
+    with pytest.raises(ValueError) as exc:
+        indicvoices_config("xx-XX")
+    message = str(exc.value)
+    assert "xx-XX" in message
+    assert "hindi" in message, "must list what IS available"
+
+
+def test_stream_asks_the_dataset_for_the_mapped_config():
+    """The mapping has to be wired into stream(), not merely exist."""
+    import sys
+    import types
+
+    from dhvani.corpus import IndicVoicesCorpus
+
+    seen = {}
+
+    class MockDataset:
+        def __iter__(self):
+            yield {"audio": {"array": np.zeros(16000, dtype=np.float32),
+                             "sampling_rate": 16000},
+                   "text": "नमस्ते"}
+
+    def fake_load_dataset(dataset_id, config, **kwargs):
+        seen["dataset_id"] = dataset_id
+        seen["config"] = config
+        return MockDataset()
+
+    mock = types.ModuleType("datasets")
+    mock.load_dataset = fake_load_dataset
+    sys.modules["datasets"] = mock
+    try:
+        list(IndicVoicesCorpus().stream("kn-IN", limit=1))
+    finally:
+        del sys.modules["datasets"]
+
+    assert seen["config"] == "kannada", f"asked for {seen['config']!r}"

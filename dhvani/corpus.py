@@ -30,6 +30,45 @@ from dhvani.ids import segment_id as compute_id
 SCHEMA_PROBE_ROWS = 50
 
 DEFAULT_DATASET = "ai4bharat/IndicVoices"
+
+INDICVOICES_CONFIGS = {
+    "as": "assamese", "bn": "bengali", "brx": "bodo", "doi": "dogri",
+    "gu": "gujarati", "hi": "hindi", "kn": "kannada", "ks": "kashmiri",
+    "kok": "konkani", "mai": "maithili", "ml": "malayalam", "mni": "manipuri",
+    "mr": "marathi", "ne": "nepali", "or": "odia", "pa": "punjabi",
+    "sa": "sanskrit", "sat": "santali", "sd": "sindhi", "ta": "tamil",
+    "te": "telugu", "ur": "urdu",
+}
+"""Language code -> the config name IndicVoices actually publishes.
+
+stream() used to derive this as lang.split("-")[0], asking the dataset for
+"hi", "kn", "ml". IndicVoices names its configs by full language: "hindi",
+"kannada", "malayalam". Every collect run against the real corpus failed on
+the first language, for all three the project targets -- the harness had
+only ever been exercised against FakeCorpus.
+
+Worth knowing how that failure presented, because it does not point at the
+cause: `datasets` reports a config it cannot resolve on a gated repo as
+"Dataset 'ai4bharat/IndicVoices' is a gated dataset ... ask for access", so
+a wrong config name looks exactly like a permissions problem.
+"""
+
+
+def indicvoices_config(lang: str) -> str:
+    """Resolve "hi-IN" (or bare "hi") to the dataset's config name.
+
+    Both spellings are accepted deliberately: Tier0Conformer speaks the bare
+    code and the corpus speaks the full tag, and that mismatch has already
+    caused one bug (I6 -- one Tier 0 backend per language).
+    """
+    code = lang.split("-")[0]
+    try:
+        return INDICVOICES_CONFIGS[code]
+    except KeyError:
+        raise ValueError(
+            f"no IndicVoices config for language {lang!r}. "
+            f"Available: {', '.join(sorted(INDICVOICES_CONFIGS.values()))}"
+        ) from None
 """The corpus a calibration run streams unless --dataset says otherwise.
 
 Named rather than inlined so IndicVoicesCorpus's default and the CLI's
@@ -130,7 +169,7 @@ class IndicVoicesCorpus:
     def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
         from datasets import load_dataset  # lazy: keeps the `data` extra optional
 
-        config = lang.split("-")[0]  # "hi-IN" -> "hi"
+        config = indicvoices_config(lang)  # "hi-IN" -> "hindi"
         ds = load_dataset(self.dataset_id, config, split="train", streaming=True)
 
         count = 0

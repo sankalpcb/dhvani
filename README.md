@@ -26,12 +26,11 @@ The calibration ran for real on 2026-08-25: 150 IndicVoices utterances (50 each 
 Kannada, Malayalam) scored locally, 124 escalated to Google Chirp 2 live, **$0.10 total**.
 
 ```json
-"tier1": { "0.0-0.1": -21.65,  "0.1-0.2": -16.53 }
+"tier1": { "0.0-0.1": -17.91,  "0.1-0.2": -14.75 }
 ```
 
-**Both deltas are negative.** Tier 1 transcribes this corpus *worse* than Tier 0 — mean toWER
-45.6 against 25.0 — so the shipped `delta_table.json` makes the router escalate nothing at
-all. `plan()` excludes non-positive delta by construction (invariant I3), so the table is
+**Both deltas are negative.** Tier 1 transcribes this corpus *worse* than Tier 0, so the
+shipped `delta_table.json` makes the router escalate nothing at all. `plan()` excludes non-positive delta by construction (invariant I3), so the table is
 self-enforcing.
 
 That is a result, not a broken run, and it is the one worth having. AI4Bharat's
@@ -40,12 +39,16 @@ IndicConformer 600M is purpose-built for Indic languages; Chirp 2 is general mul
 usable chirp model for them. The harness exists to ask *"is escalation worth paying for?"* and
 for this pairing the answer is no — established for ten cents rather than assumed either way.
 
-It was checked before being believed. Three candidate artifacts were measured, not waved away:
-0 of 124 Tier 1 transcripts were empty; digit normalization (`3456` where the reference spells
-numbers out) affects only 10% of outputs; and orthographic variance — `हाँ` against `हां`,
-chandrabindu against anusvara, the same word scored as 100% WER — is real but small.
-Normalizing NFC, chandrabindu, zero-width joiners and punctuation moves the delta from −20.7
-to −17.3. **Roughly 3 points is measurement noise and roughly 17 is genuine.**
+It was checked before being believed, and the check changed the metric. Three candidate
+artifacts were measured rather than waved away: 0 of 124 Tier 1 transcripts were empty; digit
+normalization (`3456` where the reference spells numbers out) affects only 10% of outputs; and
+orthographic variance — `हाँ` against `हां`, chandrabindu against anusvara, the same word
+scored as a total miss — was real. toWER now folds that class of difference away (see
+`normalize_orthography`), which moved the deltas from −21.65 and −16.53 to the figures above.
+
+So the numbers you see are *after* removing the obvious objection. **Roughly 4 points were
+measurement noise; the remaining ~18 are genuine.** Digits are the known remaining gap: they
+cost Tier 1 real WER and need a per-language number lexicon rather than a character fold.
 
 A second prediction held. Risk skewed hard low — 106 of 150 in the bottom bucket, median
 0.0667, nothing at all above 0.6 — because `ctc_rnnt_disagreement` carries weight 0.4667 and

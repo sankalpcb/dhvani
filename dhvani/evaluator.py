@@ -19,6 +19,7 @@ entirely requires a phonetic distance or a loanword lexicon — out of scope for
 Phase 1.
 """
 
+import unicodedata
 from collections import Counter
 
 import jiwer
@@ -57,6 +58,70 @@ def to_latin(text: str) -> str:
     return " ".join(out)
 
 
+# Candrabindu -> anusvara, per script. The two mark nasalisation and modern
+# orthography uses them interchangeably in a great many words, but they
+# transliterate differently (ITRANS ".n" against "m"), so toWER scored हाँ
+# against हां as a total miss. That is not a corner case: it is how Chirp and
+# the IndicVoices references routinely differ.
+_NASAL_FOLD = str.maketrans({
+    "\u0901": "\u0902",  # Devanagari
+    "\u0981": "\u0982",  # Bengali
+    "\u0a01": "\u0a02",  # Gurmukhi
+    "\u0a81": "\u0a82",  # Gujarati
+    "\u0b01": "\u0b02",  # Oriya
+    "\u0c00": "\u0c02",  # Telugu (combining)
+    "\u0c01": "\u0c02",  # Telugu
+    "\u0c80": "\u0c82",  # Kannada
+    "\u0d00": "\u0d02",  # Malayalam (combining)
+    "\u0d01": "\u0d02",  # Malayalam
+})
+
+# Zero-width joiner and non-joiner change rendering, not words. Common in
+# Malayalam chillu forms.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200c\u200d"))
+
+def _is_punctuation(ch: str) -> bool:
+    r"""True for Unicode punctuation only.
+
+    NOT `[^\w\s]`, which was the first attempt and was badly wrong: Python's
+    \w excludes category Mn, so that pattern stripped every Devanagari
+    combining vowel sign. नौ and नो both collapsed to न -- two different
+    words scored identical. Category-based filtering keeps marks (Mn, Mc)
+    and removes only P*, which is what "punctuation" means here: the danda
+    ।, its double ॥, and ordinary Latin punctuation.
+    """
+    return unicodedata.category(ch).startswith("P")
+
+
+def normalize_orthography(text: str) -> str:
+    """Fold spelling differences that are not transcription differences.
+
+    Deliberately narrow. Every rule here changes how a word is WRITTEN and
+    never which word it is:
+
+      NFC          the same string in two Unicode forms is one string
+      nasal fold   हाँ / हां -- candrabindu and anusvara, one word
+      zero-width   ZWJ/ZWNJ affect rendering only
+      punctuation  a sentence-final danda is not a substitution; it used to
+                   transliterate to a literal "|" glued to the last token
+
+    What it deliberately does NOT do is touch vowels or consonants. नौ (nine)
+    and नो stay different words, and a test pins that -- normalization that
+    collapsed them would be inflating a score rather than measuring one.
+
+    It also does not reconcile numbers. Chirp emits "3456" where the
+    references spell digits out, which costs Tier 1 real WER; that affects
+    about 10% of the calibration corpus and needs a per-language number
+    lexicon, not a character fold.
+
+    Applied by to_wer() rather than by to_latin(), because to_latin's job is
+    to map scripts and punctuation is not script.
+    """
+    text = unicodedata.normalize("NFC", text)
+    text = text.translate(_NASAL_FOLD).translate(_ZERO_WIDTH)
+    return "".join(" " if _is_punctuation(ch) else ch for ch in text)
+
+
 def plain_wer(reference: str, hypothesis: str) -> float:
     """Standard WER. Empty reference and hypothesis scores 0."""
     if not reference.strip() and not hypothesis.strip():
@@ -65,5 +130,12 @@ def plain_wer(reference: str, hypothesis: str) -> float:
 
 
 def to_wer(reference: str, hypothesis: str) -> float:
-    """WER computed after transliterating both sides to a common script."""
-    return plain_wer(to_latin(reference), to_latin(hypothesis))
+    """WER computed after normalizing orthography and transliterating both
+    sides to a common script.
+
+    Normalization runs BEFORE transliteration on purpose: ITRANS output uses
+    "." and "~" as meaningful characters, so stripping punctuation afterwards
+    would corrupt the transliteration it is meant to clean up.
+    """
+    return plain_wer(to_latin(normalize_orthography(reference)),
+                     to_latin(normalize_orthography(hypothesis)))

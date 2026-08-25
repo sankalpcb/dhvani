@@ -283,19 +283,129 @@ def test_cli_escalate_in_replay_mode_never_makes_a_live_call(tmp_path, capsys,
     assert len(track) == len(segments)
     # Anti-vacuity: "never reached the live client" is trivially true of a
     # run that escalated nothing, so prove the replay path really ran.
-    # Checked against the STORE, not against `track` above -- stdout is
-    # run()'s Tier 0 output and does not carry the escalation (the merged
-    # result lands in the store as a new track version), so asserting this
-    # on stdout would fail even though escalation succeeded.
-    from dhvani.store import Store as _Store
-    with _Store(str(tmp_path / "t.db")) as check:
-        version = check.latest_track_version("clip.wav")
+    # This used to have to consult the store, because stdout carried run()'s
+    # Tier 0 entries and not the escalation; the CLI now prints the
+    # reconciled track, so the evidence is right here in stdout.
+    assert any(e["text"] == "escalated-by-chirp" for e in track), (
+        "replay produced no escalated segments -- nothing was exercised"
+    )
+
+
+def test_cli_prints_the_reconciled_track_not_the_tier0_input(tmp_path, capsys):
+    """The CLI printed run()'s Tier 0 entries even when --reconcile had just
+    merged Tier 1 results into a new track version.
+
+    So an operator who paid for Tier 1 got output that did not contain what
+    they bought -- the escalated captions existed only inside the SQLite
+    store, reachable by nothing the CLI offered. stdout is the product of
+    this command; it has to show the track the run actually ended with.
+    """
+    from dhvani.store import Store
+
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, segments = _prepare(tmp_path, wav_path)
+    db = tmp_path / "t.db"
+
+    exit_code = main([
+        str(wav_path), "--db", str(db), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+        "--budget", "10.0", "--escalate", "--reconcile",
+    ])
+
+    assert exit_code == 0
+    track = json.loads(capsys.readouterr().out)
+    assert [e["text"] for e in track] == ["escalated-by-chirp"], (
+        "stdout must carry the escalated text, not the Tier 0 text"
+    )
+
+    # And it must be the SAME track the store ended on, not a lookalike
+    # rebuilt in the CLI.
+    with Store(str(db)) as store:
+        version = store.latest_track_version("clip.wav")
         assert version > 1, "reconcile() never advanced the track"
-        merged = json.loads(
-            check.get_track("clip.wav", version)["content_json"])
-        assert any(e["text"] == "escalated-by-chirp" for e in merged), (
-            "replay produced no escalated segments -- nothing was exercised"
+        stored = json.loads(store.get_track("clip.wav", version)["content_json"])
+    assert track == stored
+
+
+def test_reconciled_output_carries_the_recomputed_band(tmp_path, capsys):
+    """merge_entries() recomputes band from the escalated risk so a segment
+    can leave the review band. Printing the Tier 0 entries threw that away
+    silently; printing the merged track must preserve it, band and risk
+    agreeing on every entry."""
+    from dhvani.pipeline import band_of
+
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, _ = _prepare(tmp_path, wav_path)
+
+    assert main([
+        str(wav_path), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+        "--budget", "10.0", "--escalate", "--reconcile",
+    ]) == 0
+
+    track = json.loads(capsys.readouterr().out)
+    assert track, "nothing was printed"
+    for entry in track:
+        assert entry["band"] == band_of(entry["risk"]), (
+            f"band {entry['band']} disagrees with risk {entry['risk']}"
         )
+
+
+def test_out_file_still_matches_stdout_for_a_reconciled_track(tmp_path, capsys):
+    """--out's byte-for-byte contract with stdout predates escalation and
+    must survive it: both sides have to move to the reconciled track
+    together, or `make bench` reports on a different track than the one the
+    operator was shown."""
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, _ = _prepare(tmp_path, wav_path)
+    out_path = tmp_path / "nested" / "track.json"
+
+    assert main([
+        str(wav_path), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+        "--budget", "10.0", "--escalate", "--reconcile",
+        "--out", str(out_path),
+    ]) == 0
+
+    printed = capsys.readouterr().out
+    # The file holds the payload; stdout holds the payload plus the newline
+    # print() appends. That one-character difference is pre-existing and not
+    # what this test is about -- the point is that both sides carry the SAME
+    # track, so they must not be allowed to drift apart.
+    assert printed == out_path.read_text(encoding="utf-8") + "\n", (
+        "--out and stdout diverged"
+    )
+    assert "escalated-by-chirp" in printed
+    # Still `make bench`'s input contract, now on a reconciled track.
+    assert report_main([str(out_path)]) == 0
+
+
+def test_a_run_with_no_escalation_flags_prints_the_tier0_track(tmp_path, capsys):
+    """The plain path must not change. Without --escalate/--reconcile the
+    CLI never touches tracks, and reading the store here would make a bare
+    `dhvani clip.wav` start replaying a previous run's escalation."""
+    wav_path = tmp_path / "clip.wav"
+    fixtures, delta_path, _ = _prepare(tmp_path, wav_path)
+    db = tmp_path / "t.db"
+
+    # First, a run that escalates and leaves a reconciled v2 in the store.
+    assert main([
+        str(wav_path), "--db", str(db), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+        "--budget", "10.0", "--escalate", "--reconcile",
+    ]) == 0
+    assert "escalated-by-chirp" in capsys.readouterr().out
+
+    # Then the same audio with no escalation flags at all.
+    assert main([
+        str(wav_path), "--db", str(db), "--mode", "replay",
+        "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+    ]) == 0
+
+    track = json.loads(capsys.readouterr().out)
+    assert [e["text"] for e in track] == ["नमस्ते world"], (
+        "a non-escalating run must print its own Tier 0 output"
+    )
 
 
 def test_cli_replay_escalation_reserves_no_money(tmp_path, capsys):

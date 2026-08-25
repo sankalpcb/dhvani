@@ -11,6 +11,13 @@ subcommands when it adds a second verb.
 
 --out persists the track as JSON so `make bench` (dhvani.report_cli) has
 an input; the same payload still goes to stdout.
+
+What that payload contains is the track the run ENDED with. For a plain
+run that is run()'s Tier 0 output. For --escalate/--reconcile it is the
+reconciled track read back from the store, because reconcile() merges Tier
+1 results into a new version there rather than into run()'s return value --
+so printing the latter showed the operator the input to the escalation they
+had just paid for, and the captions they bought reached nothing but SQLite.
 """
 
 import argparse
@@ -70,13 +77,15 @@ def main(argv=None) -> int:
         )
         entries = run(pcm, os.path.basename(args.audio), tier0, store,
                       delta_table, args.budget, samples=samples)
+        # Replaced below by the reconciled track when escalation runs.
+        final_entries = entries
 
         if args.escalate or args.reconcile:
             from dhvani.backends.async_base import SyncAsyncAdapter
             from dhvani.backends.tier1_chirp import Tier1Chirp
             from dhvani.escalate import escalate as do_escalate
             from dhvani.reconcile import reconcile as do_reconcile
-            from dhvani.track import entries_to_json
+            from dhvani.track import entries_from_json, entries_to_json
 
             source = os.path.basename(args.audio)
             # Real Segments, not stubs: Tier1Chirp.transcribe() reads .pcm.
@@ -117,7 +126,31 @@ def main(argv=None) -> int:
                     tier1.adopt(job["job_id"], job_segments)
                 do_reconcile(source, tier1, store, samples=samples)
 
-    payload = json.dumps([e.__dict__ for e in entries], ensure_ascii=False, indent=2)
+            # stdout is this command's product, so it has to show the track
+            # the run ended with. run()'s `entries` are the Tier 0 INPUT to
+            # the escalation just performed: reconcile() merges Tier 1
+            # results into a new version in the store (recomputing each
+            # band from the escalated risk, see track.merge_entries), and
+            # none of that reached the operator -- the captions they paid
+            # for existed only inside SQLite, reachable by nothing the CLI
+            # offered.
+            #
+            # Deliberately inside this branch, and reading the store rather
+            # than trusting do_reconcile()'s return value. A run with
+            # neither flag never touches tracks at all, so consulting the
+            # store there would make a bare `dhvani clip.wav` replay a
+            # previous run's escalation instead of reporting its own Tier 0
+            # output. And reconcile() returns the version already in the
+            # store when it loses a put_track() race, so the store -- not
+            # the merge that may never have landed -- is the authority on
+            # what to print.
+            version = store.latest_track_version(source)
+            if version:
+                final_entries = entries_from_json(
+                    store.get_track(source, version)["content_json"])
+
+    payload = json.dumps([e.__dict__ for e in final_entries],
+                         ensure_ascii=False, indent=2)
 
     if args.out:
         # Same bytes that go to stdout, so a track consumed from --out and

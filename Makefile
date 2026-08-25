@@ -1,7 +1,7 @@
 .PHONY: test bench track clean-track
 
 # Override on the command line, e.g. `make bench AUDIO=clips/sample.wav`.
-AUDIO       ?= sample.wav
+AUDIO       ?= samples/fleurs-hi-12091698556182716328.wav
 TRACK       ?= results/track.json
 DELTA_TABLE ?= delta_table.json
 DHVANI_MODE ?= replay
@@ -13,13 +13,18 @@ test:
 # the project ever wrote, so the target could not run. The CLI now persists
 # the track via --out, and bench builds it first.
 #
-# `fixtures/` and `delta_table.json` are deferred to Phase 2 (see the plan's
-# Phase 1 Exit Criteria), so a clean clone has no audio to transcribe and no
-# measured deltas. bench is wired correctly and will fail loudly on the
-# missing input rather than reporting on a file nobody produced.
-# A clean clone has no sample.wav (*.wav is gitignored), so generate the one
-# the committed replay fixtures were recorded from. Deterministic: the
-# fixture filenames are hashes of exactly this signal.
+# A clean clone CAN now run this: the demo audio and its Tier 0 replay
+# fixtures are both committed. `delta_table.json` is not -- it is the output
+# of `dhvani-calibrate`, which needs the real corpus -- so bench renders a
+# frontier of zeros until a calibration run produces one. That is honest
+# rather than broken: with no measured deltas, nothing is worth escalating.
+# The default AUDIO is real speech committed under samples/ (see
+# samples/ATTRIBUTION.md): a clean clone already has it, and its replay
+# fixtures are committed too, so `make track` needs no model and no download.
+#
+# sample.wav is the synthetic sweep scripts/spike_chirp.py uses. It stays
+# gitignored and is generated on demand; its fixtures are committed as well,
+# and the generator is deterministic, so the filenames still match.
 sample.wav:
 	uv run python scripts/make_sample_wav.py
 

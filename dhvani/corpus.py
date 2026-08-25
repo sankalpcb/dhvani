@@ -29,6 +29,13 @@ from dhvani.ids import segment_id as compute_id
 # should fail loud rather than silently yield nothing.
 SCHEMA_PROBE_ROWS = 50
 
+DEFAULT_DATASET = "ai4bharat/IndicVoices"
+"""The corpus a calibration run streams unless --dataset says otherwise.
+
+Named rather than inlined so IndicVoicesCorpus's default and the CLI's
+advertised default cannot drift apart; a test pins the help text to it.
+"""
+
 
 @dataclass(frozen=True)
 class CorpusItem:
@@ -117,7 +124,7 @@ class IndicVoicesCorpus:
     and calibration needs a few thousand utterances.
     """
 
-    def __init__(self, dataset_id: str = "ai4bharat/IndicVoices"):
+    def __init__(self, dataset_id: str = DEFAULT_DATASET):
         self.dataset_id = dataset_id
 
     def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:

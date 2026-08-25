@@ -63,6 +63,16 @@ def main(argv=None) -> int:
     c.add_argument("--pcm-cache", default=DEFAULT_PCM_CACHE,
                    help="directory phase 1 writes segment PCM to and phase 2 "
                         "reads it back from; both phases must be given the same one")
+    # default=None, resolved against corpus.DEFAULT_DATASET inside the
+    # branch below: dhvani.corpus must not be imported at module level (see
+    # this module's docstring), so the constant is not available here to use
+    # as an argparse default. The literal in the help text is pinned to the
+    # constant by a test so the two cannot drift.
+    c.add_argument("--dataset", default=None,
+                   help="HuggingFace dataset id to stream "
+                        "(default: ai4bharat/IndicVoices). Recorded into "
+                        "each segment's source_id, so a second dataset "
+                        "collected into the same --db stays distinguishable")
 
     e = sub.add_parser("escalate", help="phase 2: stratify and run Tier 1 (paid)")
     e.add_argument("--db", default="calibration.db")
@@ -90,9 +100,9 @@ def main(argv=None) -> int:
 
     if args.cmd == "collect":
         from dhvani.backends.tier0_conformer import Tier0Conformer
-        from dhvani.corpus import IndicVoicesCorpus
+        from dhvani.corpus import DEFAULT_DATASET, IndicVoicesCorpus
 
-        corpus = IndicVoicesCorpus()
+        corpus = IndicVoicesCorpus(args.dataset or DEFAULT_DATASET)
         with Store(args.db) as store:
             # I6: ONE BACKEND PER LANGUAGE. A single Tier0Conformer() takes
             # the default lang="hi", so reusing it across --langs decoded

@@ -43,6 +43,21 @@ SEGMENTS = _segments()
 TABLE = {"tier1": {"0.6-0.7": 18.0}}
 
 
+def _live_stack(store, text="escalated"):
+    """The production shape: SyncAsyncAdapter(Recorded(sync backend)).
+
+    Spend only lands when the call actually happens, which for
+    SyncAsyncAdapter is at poll() -- so a test about MONEY has to drive the
+    poll, not just escalate(). Tests about deduplication assert on jobs and
+    call counts instead, which is the more direct claim anyway.
+    """
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
+    inner.transcribe = lambda seg: {"text": text, "signals": {}}
+    return SyncAsyncAdapter(Recorded(inner, "live", "fixtures", store))
+
+
 def test_zero_budget_submits_nothing(store):
     assert escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
                     store, TABLE, budget_usd=0.0) is None
@@ -70,10 +85,19 @@ def test_low_risk_segments_are_not_escalated(store):
     assert "b" * 64 not in store.get_job(job_id)["segment_ids"]
 
 
-def test_spend_is_reserved_before_submission(store):
-    escalate("vid1", _entries(), SEGMENTS, SyncAsyncAdapter(StubSync()),
-             store, TABLE, budget_usd=10.0)
-    assert store.total_spend() > 0.0
+def test_spend_lands_when_the_call_happens_not_when_it_is_planned(store):
+    """escalate() used to reserve the batch itself, which double-charged:
+    Recorded reserves again at poll time, where the request actually goes
+    out. escalate() now only CHECKS the ceiling, so nothing is on the
+    ledger until the call is made."""
+    backend = _live_stack(store)
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert job_id is not None
+    assert store.total_spend() == 0.0, "planning a batch is not spending"
+
+    _drain_once(backend, store)
+    assert store.total_spend() == pytest.approx(cost_for_duration_ms(3000))
 
 
 def test_escalation_fails_closed_at_the_ceiling(store):
@@ -128,12 +152,14 @@ def test_resubmitting_an_in_flight_batch_reserves_no_additional_spend(store):
     registers no new work -- but it charged for that work again, once per
     invocation, with nothing bounding the total but the $20 ceiling itself.
     """
-    backend = SyncAsyncAdapter(StubSync())
+    backend = _live_stack(store)
     escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    _drain_once(backend, store)
     after_first = store.total_spend()
     assert after_first > 0.0, "the first escalation must really cost something"
 
     escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    _drain_once(backend, store)
 
     assert store.total_spend() == pytest.approx(after_first)
 
@@ -142,8 +168,9 @@ def test_repeated_escalation_of_an_in_flight_batch_stays_bounded(store):
     """"Unbounded across reconcile passes" stated as a test: the operator
     loop is `--escalate --reconcile` re-run until the track converges, and
     every pass before convergence used to add another full batch charge."""
-    backend = SyncAsyncAdapter(StubSync())
+    backend = _live_stack(store)
     escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    _drain_once(backend, store)
     after_first = store.total_spend()
 
     for _ in range(10):
@@ -190,7 +217,6 @@ def test_re_escalating_a_dead_lettered_batch_makes_it_pollable_again(store):
     so it must get one.
     """
     backend = SyncAsyncAdapter(StubSync())
-    per_segment_cost = cost_for_duration_ms(3000)
     first = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
 
     # How reconcile() leaves a job it has given up on: no segment of it was
@@ -204,9 +230,6 @@ def test_re_escalating_a_dead_lettered_batch_makes_it_pollable_again(store):
     # second row to create, only the existing one to reopen.
     assert second == first
     assert [job["job_id"] for job in store.open_jobs()] == [first]
-    # The retry is genuinely paid for; this asserts it is not free, only
-    # that it now buys something.
-    assert store.total_spend() == pytest.approx(2 * per_segment_cost)
 
 
 def test_a_hypothesis_from_another_variant_does_not_suppress_escalation(store):
@@ -223,7 +246,7 @@ def test_a_hypothesis_from_another_variant_does_not_suppress_escalation(store):
     job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
 
     assert job_id is not None
-    assert store.total_spend() == pytest.approx(cost_for_duration_ms(3000))
+    assert store.get_job(job_id)["segment_ids"] == ["a" * 64]
 
 
 def _multi_entries():
@@ -250,22 +273,21 @@ def test_multi_candidate_batch_reserves_summed_cost_in_one_call(store):
     total cost must be reserved with a single reserve_spend() call, not N
     partial ones."""
     calls = []
-    original_reserve = store.reserve_spend
+    original_check = store.check_budget
 
-    def spy(tier, cost_usd):
-        calls.append((tier, cost_usd))
-        return original_reserve(tier, cost_usd)
+    def spy(cost_usd):
+        calls.append(cost_usd)
+        return original_check(cost_usd)
 
-    store.reserve_spend = spy
+    store.check_budget = spy
 
     job_id = escalate("vid1", _multi_entries(), MULTI_SEGMENTS, SyncAsyncAdapter(StubSync()),
                       store, MULTI_TABLE, budget_usd=10.0)
 
     assert job_id is not None
     per_segment_cost = cost_for_duration_ms(3000)
-    assert len(calls) == 1
-    assert calls[0] == ("tier1", pytest.approx(3 * per_segment_cost))
-    assert store.total_spend() == pytest.approx(3 * per_segment_cost)
+    assert len(calls) == 1, "the batch must be checked once, not per candidate"
+    assert calls[0] == pytest.approx(3 * per_segment_cost)
 
 
 def test_multi_candidate_reservation_is_atomic_on_failure(store):
@@ -297,11 +319,10 @@ def test_segments_still_missing_after_a_partial_delivery_are_re_escalated(store)
     exactly those, not for the whole batch again and not for nothing.
     """
     backend = SyncAsyncAdapter(StubSync())
-    per_segment_cost = cost_for_duration_ms(3000)
 
     job_id = escalate("vid1", _multi_entries(), MULTI_SEGMENTS, backend, store,
                       MULTI_TABLE, 10.0)
-    assert store.total_spend() == pytest.approx(3 * per_segment_cost)
+    assert len(store.get_job(job_id)["segment_ids"]) == 3
 
     # Exactly one of the three came back; the job is then dead-lettered by
     # reconcile() after MAX_JOB_ATTEMPTS of persistently partial delivery.
@@ -316,7 +337,6 @@ def test_segments_still_missing_after_a_partial_delivery_are_re_escalated(store)
     assert second is not None
     assert delivered not in store.get_job(second)["segment_ids"]
     assert len(store.get_job(second)["segment_ids"]) == 2
-    assert store.total_spend() == pytest.approx(5 * per_segment_cost)
 
 
 # --- C2: replay must cost nothing and must never reach a live backend ---
@@ -382,11 +402,71 @@ def test_live_escalation_still_reserves_the_real_cost(store):
     from dhvani.backends.base import Recorded
     from dhvani.backends.tier1_chirp import Tier1Chirp
 
-    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
-    backend = SyncAsyncAdapter(Recorded(inner, "live", "fixtures", store))
+    backend = _live_stack(store)
     job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
-
     assert job_id is not None
     # Exactly one candidate ("a", 3000ms) is ever selected -- see
-    # test_escalation_fails_closed_at_the_ceiling for why.
+    # test_escalation_fails_closed_at_the_ceiling for why. The charge lands
+    # at poll(), where Recorded makes the request.
+    _drain_once(backend, store)
     assert store.total_spend() == pytest.approx(cost_for_duration_ms(3000))
+
+
+# --- C3, second occurrence: the async path reserved twice ---
+
+def _drain_once(backend, store, source="vid1"):
+    from dhvani.reconcile import reconcile
+    from dhvani.config import POLICY_ID
+    from dhvani.track import entries_to_json
+    if store.latest_track_version(source) == 0:
+        store.put_track(source, 1, POLICY_ID, entries_to_json(_entries()), 0.0)
+    return reconcile(source, backend, store)
+
+
+def test_the_async_path_charges_each_call_exactly_once(store):
+    """escalate() reserves the batch, and Recorded.transcribe() reserves
+    again when the call actually happens at poll time -- so a live run was
+    billed twice in the ledger for one Chirp request.
+
+    This is C3 a second time. calibrate.escalate_selected had exactly this
+    shape and was fixed by making Recorded the only reserver; the CLI's
+    async path kept both, and nothing caught it because no test drove
+    escalate() THROUGH a poll with a live Recorded in the stack. The
+    existing live test asserts spend right after escalate(), before
+    SyncAsyncAdapter has called transcribe() at all.
+
+    Observed for real: recording one 4440ms Tier 1 fixture reserved
+    $0.00067 against a true price of $0.00033.
+    """
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+
+    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
+    inner.transcribe = lambda seg: {"text": "escalated", "signals": {}}
+    backend = SyncAsyncAdapter(Recorded(inner, "live", "fixtures", store))
+
+    job_id = escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+    assert job_id is not None
+    _drain_once(backend, store)
+
+    one_call = cost_for_duration_ms(3000)
+    assert store.total_spend() == pytest.approx(one_call), (
+        "one Chirp request must appear once in the ledger, not twice"
+    )
+
+
+def test_the_ceiling_still_fails_closed_before_a_batch_is_submitted(store):
+    """Removing escalate()'s reservation must not remove its guard: a batch
+    that cannot be afforded must never reach submit(), or the job exists
+    with no budget to service it."""
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier1_chirp import Tier1Chirp
+
+    inner = Tier1Chirp(client=ExplodingClient(), lang="hi-IN")
+    backend = SyncAsyncAdapter(Recorded(inner, "live", "fixtures", store))
+    store.reserve_spend("tier1", 20.0 - cost_for_duration_ms(3000) + 0.0001)
+
+    with pytest.raises(BudgetExceeded):
+        escalate("vid1", _entries(), SEGMENTS, backend, store, TABLE, 10.0)
+
+    assert store.open_jobs() == [], "no job may be created for an unaffordable batch"

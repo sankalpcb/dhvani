@@ -66,6 +66,101 @@ def _seed_scored_items(n=25, risk=0.65, prefix="s"):
              "tier0_variant": TIER0_VARIANT} for i in range(n)]
 
 
+# --- collect --dataset: make the corpus a choice, not a hardcode ---
+
+def _collect_argv(tmp_path, *extra):
+    return ["collect", "--db", str(tmp_path / "c.db"),
+            "--langs", "hi-IN", "--per-lang", "1",
+            "--scored-out", str(tmp_path / "scored.json"),
+            "--pcm-cache", str(tmp_path / "pcm"), *extra]
+
+
+def _record_corpus(monkeypatch, seen, items=()):
+    """Stand in for IndicVoicesCorpus, capturing the dataset id it is built
+    with. Patched on dhvani.corpus because the CLI imports the name inside
+    its collect branch (goal G5), so the lookup happens at call time."""
+    from dhvani.corpus import FakeCorpus
+
+    def make(dataset_id):
+        seen["dataset_id"] = dataset_id
+        return FakeCorpus(list(items), dataset_id=dataset_id)
+
+    monkeypatch.setattr("dhvani.corpus.IndicVoicesCorpus", make)
+
+
+def test_collect_passes_the_dataset_flag_to_the_corpus(tmp_path, monkeypatch, capsys):
+    """collect hardcoded IndicVoicesCorpus(), so the dataset_id now recorded
+    into every segment's source_id could never actually vary."""
+    seen = {}
+    _record_corpus(monkeypatch, seen)
+
+    rc = main(_collect_argv(tmp_path, "--dataset", "ai4bharat/Kathbath"))
+
+    assert rc == 0
+    assert seen["dataset_id"] == "ai4bharat/Kathbath"
+
+
+def test_collect_still_defaults_to_indicvoices(tmp_path, monkeypatch, capsys):
+    """Omitting the flag must not change what a run collects."""
+    from dhvani.corpus import DEFAULT_DATASET
+
+    seen = {}
+    _record_corpus(monkeypatch, seen)
+
+    assert main(_collect_argv(tmp_path)) == 0
+    assert seen["dataset_id"] == DEFAULT_DATASET
+
+
+def test_the_collect_help_names_the_real_default(capsys):
+    """The default is resolved inside the branch, so the help text spells it
+    out separately. Pin them together or they drift apart silently."""
+    from dhvani.corpus import DEFAULT_DATASET
+
+    with pytest.raises(SystemExit):
+        main(["collect", "--help"])
+
+    assert DEFAULT_DATASET in capsys.readouterr().out
+
+
+def test_the_chosen_dataset_reaches_the_segment_row(tmp_path, monkeypatch, capsys):
+    """The whole chain, end to end: --dataset reaches the corpus, collect()
+    writes it into source_id, and the store can tell two datasets apart."""
+    rng = np.random.default_rng(7)
+    audio = 0.3 * rng.standard_normal(32000)
+    _record_corpus(monkeypatch, {},
+                   items=[(audio, 16000, "ref-0", "hi-IN", "spk0", "d0")])
+
+    class StubTier0:
+        name = "tier0"
+
+        def __init__(self, lang="hi"):
+            self.lang = lang
+
+        @property
+        def variant_key(self):
+            return f"tier0|{self.lang}|m"
+
+        def cost_per_call(self, segment):
+            return 0.0
+
+        def transcribe(self, segment):
+            return {"text": "नमस्ते", "signals": {"ctc_rnnt_disagreement": 0.4}}
+
+    monkeypatch.setattr(
+        "dhvani.backends.tier0_conformer.Tier0Conformer", StubTier0)
+
+    db = str(tmp_path / "c.db")
+    assert main(["collect", "--db", db, "--langs", "hi-IN", "--per-lang", "1",
+                 "--scored-out", str(tmp_path / "scored.json"),
+                 "--pcm-cache", str(tmp_path / "pcm"),
+                 "--dataset", "ai4bharat/Kathbath"]) == 0
+
+    with Store(db) as store:
+        sources = [r["source_id"] for r in store.conn.execute(
+            "SELECT DISTINCT source_id FROM segments").fetchall()]
+    assert sources == ["calib:ai4bharat/Kathbath:hi-IN"]
+
+
 def test_escalate_without_confirm_refuses_to_spend(tmp_path, capsys):
     """The cost gate: a run that would spend must not do so silently."""
     rc = main(["escalate", "--db", str(tmp_path / "t.db"),

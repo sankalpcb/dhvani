@@ -377,6 +377,48 @@ def test_escalate_fails_loudly_when_pcm_is_not_cached(tmp_path, monkeypatch, cap
     assert _RecordingTier1.seen == [], "must not transcribe anything"
 
 
+def test_escalate_fails_cleanly_on_a_corrupt_pcm_cache(tmp_path, monkeypatch, capsys):
+    """A half-written .npy must reach the operator as a message and a
+    non-zero exit, not as a numpy traceback out of the middle of a paid
+    run. The escalate handler caught PcmCacheMiss by name, so its corrupt
+    sibling would have escaped it entirely."""
+    from dhvani.calibrate import pcm_cache_path
+
+    _RecordingTier1.seen = []
+    monkeypatch.setattr("dhvani.backends.tier1_chirp.Tier1Chirp", _RecordingTier1)
+
+    db = str(tmp_path / "t.db")
+    scored = _seed_scored_items(n=25)
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored))
+    with Store(db) as store:
+        for item in scored:
+            store.put_reference(item["segment_id"], "alpha beta", item["lang"])
+            store.put_hypothesis(item["segment_id"], "tier0", "alpha WRONG",
+                                 {}, 0.0, TIER0_VARIANT)
+
+    # A complete cache, then one entry truncated the way an interrupted
+    # collect leaves it. The rest are intact, so this is specifically the
+    # one bad file failing the run -- not an empty cache directory.
+    cache = _seed_pcm(tmp_path, scored)
+    victim = pcm_cache_path(cache, scored[0]["segment_id"])
+    whole = open(victim, "rb").read()
+    with open(victim, "wb") as fh:
+        fh.write(whole[:128])
+
+    out = tmp_path / "d.json"
+    rc = main(["escalate", "--db", db, "--scored-in", str(scored_path),
+               "--pcm-cache", cache, "--mode", "live",
+               "--out", str(out), "--confirm"])
+
+    assert rc == 3, "a corrupt cache entry must exit 3, like a missing one"
+    err = capsys.readouterr().err
+    assert scored[0]["segment_id"] in err, "must name the segment"
+    assert victim in err, "must name the unreadable file"
+    assert "delete" in err.lower(), "must give the remedy that works"
+    assert not out.exists(), "a failed run must not write a delta table"
+
+
 # --- I5: escalate must be runnable in replay mode ---
 
 def test_escalate_replay_mode_runs_without_credentials_or_spend(tmp_path, monkeypatch):

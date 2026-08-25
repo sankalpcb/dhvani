@@ -48,8 +48,29 @@ array is a changed name.
 """
 
 
-class PcmCacheMiss(RuntimeError):
+class PcmCacheError(RuntimeError):
+    """Phase 2 could not get a segment's audio out of the PCM cache.
+
+    A common base so cli_calibrate can turn every way the cache can fail
+    into one message and exit 3, rather than catching each subclass by name
+    and letting the next one through as a traceback.
+    """
+
+
+class PcmCacheMiss(PcmCacheError):
     """Phase 2 needed a segment's audio and phase 1 had not cached it."""
+
+
+class PcmCacheCorrupt(PcmCacheError):
+    """The file is there but numpy cannot read an array out of it.
+
+    Distinct from PcmCacheMiss because the remedy is the opposite one. A
+    miss is repaired by re-running collect. A truncated file is NOT:
+    save_pcm() skips any path that already exists -- that skip is what
+    makes a killed multi-hour collect resumable -- so collect steps over
+    the wreckage and phase 2 fails again identically. The file has to be
+    deleted first, and the error has to say so or the operator loops.
+    """
 
 
 class NoMeasuredBuckets(RuntimeError):
@@ -99,7 +120,25 @@ def load_pcm(cache_dir: str, segment_id: str):
             f"without it. Re-run `dhvani-calibrate collect` with "
             f"--pcm-cache {cache_dir}."
         )
-    return np.load(path)
+    try:
+        return np.load(path)
+    except Exception as exc:
+        # A collect run killed mid-np.save leaves a partial file. numpy
+        # reports that inconsistently -- EOFError for an empty file,
+        # ValueError for a short one -- and for a file truncated inside the
+        # magic string it reports "This file contains pickled (object)
+        # data" and suggests allow_pickle=True, which is wrong here and
+        # unsafe in general. Raise one diagnostic that names the segment,
+        # names the file, and gives the remedy that actually works.
+        raise PcmCacheCorrupt(
+            f"cached PCM for segment {segment_id} is unreadable: {path} "
+            f"({type(exc).__name__}: {exc}). A collect run killed partway "
+            f"through np.save leaves a file like this. Re-running "
+            f"`dhvani-calibrate collect` will NOT repair it -- save_pcm() "
+            f"skips paths that already exist, which is what makes collect "
+            f"resumable -- so delete {path} (or pass a fresh --pcm-cache) "
+            f"and re-run collect to rewrite it."
+        ) from exc
 
 
 class LazySegments:

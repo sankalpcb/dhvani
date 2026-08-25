@@ -20,7 +20,7 @@ from dhvani.calibrate import (
     MIN_BUCKET_SAMPLES,
     LazySegments,
     NoMeasuredBuckets,
-    PcmCacheMiss,
+    PcmCacheError,
     collect,
     escalate_selected,
     estimate_cost,
@@ -165,7 +165,10 @@ def main(argv=None) -> int:
                                  args.fixtures, store)
                 rows.extend(escalate_selected(subset, tier1, store, segments))
             spent = store.total_spend() - before
-    except PcmCacheMiss as exc:
+    # PcmCacheError, not PcmCacheMiss: a corrupt cache entry is the
+    # other way this can fail and must reach the operator as the same
+    # clean message and exit 3, not as a traceback.
+    except PcmCacheError as exc:
         print(str(exc), file=sys.stderr)
         return 3
 

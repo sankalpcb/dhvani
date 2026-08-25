@@ -163,6 +163,101 @@ def test_missing_cached_pcm_raises_naming_the_segment_and_path(tmp_path):
     assert empty in message
 
 
+def _corrupt_cache_entry(cache_dir, segment_id, keep):
+    """Write a real .npy for segment_id, then truncate it to `keep` bytes.
+
+    `keep` as a fraction of the file, or an absolute count. This is what a
+    collect run killed mid-np.save leaves on disk -- and save_pcm() skips
+    any path that already exists, so re-running collect steps straight over
+    the wreckage instead of repairing it.
+    """
+    from dhvani.calibrate import pcm_cache_path, save_pcm
+
+    save_pcm(cache_dir, segment_id, np.arange(5000, dtype=np.int16))
+    path = pcm_cache_path(cache_dir, segment_id)
+    whole = open(path, "rb").read()
+    with open(path, "wb") as fh:
+        fh.write(whole[:keep])
+    return path
+
+
+@pytest.mark.parametrize("keep,shape", [
+    (0, "nothing at all"),
+    (4, "half a magic string"),
+    (128, "a complete header and no data"),
+    (5000, "a complete header and half the data"),
+])
+def test_truncated_cached_pcm_raises_a_clean_diagnostic(tmp_path, keep, shape):
+    """numpy's own errors here are opaque, inconsistent, and in one case
+    actively misleading.
+
+    The four truncations below raise three different exception types, and
+    the 4-byte one reports "This file contains pickled (object) data" and
+    suggests allow_pickle=True -- advice that is both wrong for a truncated
+    array and dangerous to follow. None of them name the segment, name the
+    cache, or say what to do. load_pcm() owns that diagnostic for the
+    missing case already; it must own it for the unreadable case too.
+    """
+    from dhvani.calibrate import PcmCacheCorrupt, load_pcm
+
+    cache = str(tmp_path / "pcm")
+    segment_id = "deadbeef" * 8
+    path = _corrupt_cache_entry(cache, segment_id, keep)
+
+    with pytest.raises(PcmCacheCorrupt) as exc:
+        load_pcm(cache, segment_id)
+
+    message = str(exc.value)
+    assert segment_id in message, f"must name the segment ({shape})"
+    assert path in message, f"must name the file ({shape})"
+    # The operationally load-bearing half: save_pcm() skips files that
+    # already exist, so "just re-run collect" -- the remedy for a cache
+    # MISS -- silently does nothing here. Saying so is the whole point.
+    assert "delete" in message.lower(), f"must give the remedy ({shape})"
+
+
+def test_a_corrupt_cache_entry_is_not_reported_as_a_missing_one(tmp_path):
+    """Different remedies, so they must not collapse into one error.
+
+    A miss is fixed by re-running collect. A corrupt entry is not -- and an
+    operator told "re-run collect" for a file collect will skip is sent
+    into a loop that cannot terminate.
+    """
+    from dhvani.calibrate import PcmCacheCorrupt, PcmCacheMiss, load_pcm
+
+    cache = str(tmp_path / "pcm")
+    segment_id = "deadbeef" * 8
+    _corrupt_cache_entry(cache, segment_id, 128)
+
+    with pytest.raises(PcmCacheCorrupt) as exc:
+        load_pcm(cache, segment_id)
+    assert not isinstance(exc.value, PcmCacheMiss)
+
+
+def test_both_cache_failures_share_a_base_the_cli_can_catch(tmp_path):
+    """cli_calibrate's escalate path turns a cache failure into a message
+    and exit 3 rather than a traceback. It caught PcmCacheMiss by name, so
+    a new sibling would have sailed straight past it -- both are now
+    PcmCacheError, which is what that handler catches."""
+    from dhvani.calibrate import PcmCacheCorrupt, PcmCacheError, PcmCacheMiss
+
+    assert issubclass(PcmCacheMiss, PcmCacheError)
+    assert issubclass(PcmCacheCorrupt, PcmCacheError)
+
+
+def test_an_intact_cache_entry_still_loads(tmp_path):
+    """Guard against the diagnostic swallowing the happy path: the new
+    try/except must not turn a perfectly good load into an error."""
+    from dhvani.calibrate import load_pcm, save_pcm
+
+    cache = str(tmp_path / "pcm")
+    segment_id = "deadbeef" * 8
+    original = np.arange(5000, dtype=np.int16)
+    save_pcm(cache, segment_id, original)
+
+    assert np.array_equal(load_pcm(cache, segment_id), original)
+
+
 # --- R9: byte-identical utterances are ONE segment ---
 
 def test_duplicate_audio_yields_one_scored_entry(store, pcm_dir):

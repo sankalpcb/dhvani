@@ -86,3 +86,59 @@ def test_semantic_corruption_is_still_penalized():
 
 def test_to_wer_is_bounded_below_by_zero():
     assert to_wer("", "") == 0.0
+
+
+# --- orthographic normalization: same word, two spellings ---
+
+def test_chandrabindu_and_anusvara_are_the_same_word():
+    """हाँ and हां are one word written two ways -- chandrabindu against
+    anusvara. toWER scored them as a total miss (ha.n vs ham), and this is
+    not a corner case: it is how Chirp and the IndicVoices references
+    routinely differ, and it dragged the measured Tier 1 delta down."""
+    from dhvani.evaluator import to_wer
+    assert to_wer("हाँ हाँ", "हां हां") == 0.0
+
+
+def test_a_sentence_final_danda_is_not_an_error():
+    """। transliterated to a literal '|' glued to the last token, so pure
+    punctuation counted as a substitution."""
+    from dhvani.evaluator import to_wer
+    assert to_wer("योग दर्शन के जो हैं।", "योग दर्शन के जो हैं") == 0.0
+    assert to_wer("नमस्ते, दुनिया.", "नमस्ते दुनिया") == 0.0
+
+
+def test_different_vowels_are_still_different_words():
+    """The guard on all of the above. नौ (nine) and नो are genuinely
+    different, and normalization that collapsed them would be inflating
+    Tier 1's score rather than measuring it."""
+    from dhvani.evaluator import to_wer
+    assert to_wer("नौ", "नो") > 0.0
+
+
+def test_normalization_does_not_collapse_real_substitutions():
+    from dhvani.evaluator import to_wer
+    assert to_wer("योग दर्शन", "योग विज्ञान") > 0.0
+
+
+def test_unicode_composition_is_not_an_error():
+    """The same string in NFD and NFC must score identically; which form a
+    provider emits is not a transcription difference."""
+    import unicodedata
+    from dhvani.evaluator import to_wer
+    text = "कुतूहल गाँव में"
+    assert to_wer(unicodedata.normalize("NFD", text),
+                  unicodedata.normalize("NFC", text)) == 0.0
+
+
+def test_zero_width_joiners_are_ignored():
+    """ZWJ/ZWNJ change rendering, not words. Common in Malayalam chillu."""
+    from dhvani.evaluator import to_wer
+    assert to_wer("അവന്‍", "അവന്") == 0.0
+
+
+def test_the_demo_clips_tier0_tier1_disagreement_is_orthographic_only():
+    """The committed fixtures differ only in spelling, which is exactly the
+    class of difference this normalization exists to stop counting."""
+    from dhvani.evaluator import to_wer
+    assert to_wer("कुतूहल गाँव में आधे घंटे टहलना समय की हानि नहीं है",
+                  "कुतुहल गांव में आधे घंटे टहलना समय की हानि नहीं है") == 0.0

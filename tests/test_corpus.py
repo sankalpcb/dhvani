@@ -104,73 +104,6 @@ def test_extract_item_handles_missing_optional_fields():
     assert result.district is None
 
 
-def test_indic_voices_corpus_schema_mismatch_raises():
-    """IndicVoicesCorpus raises with diagnostic message after probing empty dataset."""
-    from dhvani.corpus import IndicVoicesCorpus
-    import sys
-    import types
-
-    # Mock a dataset with wrong field names that yields nothing
-    class MockDataset:
-        def __iter__(self):
-            for i in range(SCHEMA_PROBE_ROWS + 10):
-                yield {
-                    "wrong_audio_field": {"array": np.zeros(1000), "sampling_rate": 16000},
-                    "wrong_text_field": "hello",
-                }
-
-    corpus = IndicVoicesCorpus(dataset_id="test/dataset")
-
-    # Inject mock datasets module
-    mock_datasets = types.ModuleType("datasets")
-    mock_datasets.load_dataset = lambda *args, **kwargs: MockDataset()
-    sys.modules["datasets"] = mock_datasets
-
-    try:
-        with pytest.raises(ValueError) as exc_info:
-            list(corpus.stream("hi-IN", limit=1000))
-
-        assert "schema mismatch" in str(exc_info.value).lower()
-        assert "expected fields" in str(exc_info.value).lower()
-        assert "actual row keys" in str(exc_info.value).lower()
-    finally:
-        # Cleanup
-        if "datasets" in sys.modules:
-            del sys.modules["datasets"]
-
-
-def test_indic_voices_corpus_small_dataset_no_error():
-    """A small dataset that produces items before SCHEMA_PROBE_ROWS does not raise."""
-    from dhvani.corpus import IndicVoicesCorpus
-
-    class MockDataset:
-        def __iter__(self):
-            for i in range(10):  # Less than SCHEMA_PROBE_ROWS
-                yield {
-                    "audio": {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000},
-                    "text": f"hello {i}",
-                    "speaker_id": f"spk{i}",
-                    "district": f"dist{i}",
-                }
-
-    corpus = IndicVoicesCorpus(dataset_id="test/dataset")
-
-    import sys
-    import types
-
-    mock_datasets = types.ModuleType("datasets")
-    mock_datasets.load_dataset = lambda *args, **kwargs: MockDataset()
-    sys.modules["datasets"] = mock_datasets
-
-    try:
-        items = list(corpus.stream("hi-IN", limit=100))
-        assert len(items) == 10  # Should produce all 10 items without error
-    finally:
-        del sys.modules["datasets"]
-
-
-# --- the config name IndicVoices actually uses ---
-
 def test_language_tags_map_to_the_datasets_real_config_names():
     """stream() derived its config as lang.split("-")[0], asking for "hi",
     "kn", "ml". IndicVoices names its configs by full language: "hindi",
@@ -219,32 +152,159 @@ def test_an_unknown_language_says_what_is_available():
     assert "hindi" in message, "must list what IS available"
 
 
-def test_stream_asks_the_dataset_for_the_mapped_config():
-    """The mapping has to be wired into stream(), not merely exist."""
-    import sys
-    import types
+def _fake_audio_bytes(seconds=1.0, rate=16000):
+    import io
+    import soundfile as sf
+    t = np.linspace(0, seconds, int(rate * seconds), endpoint=False)
+    buf = io.BytesIO()
+    sf.write(buf, (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32),
+             rate, format="WAV", subtype="PCM_16")
+    return buf.getvalue()
 
+
+def test_a_row_in_indicvoices_real_schema_is_extracted():
+    """The published schema is not the one this module was written against.
+
+    IndicVoices stores audio under `audio_filepath` as {bytes, path} -- the
+    ENCODED file -- not under `audio` as {array, sampling_rate}. collect()
+    would have failed its schema probe on every row even once streaming
+    worked and the config name was right.
+    """
+    from dhvani.corpus import _extract_item_from_row
+
+    item = _extract_item_from_row({
+        "audio_filepath": {"bytes": _fake_audio_bytes(), "path": "x.wav"},
+        "text": "नमस्ते दुनिया",
+        "speaker_id": "S1", "district": "Narsinghpur",
+    }, "hi-IN")
+
+    assert item is not None, "real IndicVoices rows must extract"
+    assert item.reference == "नमस्ते दुनिया"
+    assert item.speaker_id == "S1"
+    assert item.district == "Narsinghpur"
+    assert item.duration_ms > 0
+    assert item.pcm.dtype == np.int16
+
+
+def test_the_previously_assumed_schema_still_works():
+    """Decoded {array, sampling_rate} rows must keep extracting -- other
+    corpora and the existing tests supply that shape."""
+    from dhvani.corpus import _extract_item_from_row
+
+    item = _extract_item_from_row({
+        "audio": {"array": np.zeros(16000, dtype=np.float32),
+                  "sampling_rate": 16000},
+        "text": "हैलो",
+    }, "hi-IN")
+    assert item is not None and item.duration_ms == 1000
+
+
+def test_a_row_with_no_usable_audio_is_skipped_not_crashed():
+    from dhvani.corpus import _extract_item_from_row
+
+    assert _extract_item_from_row({"text": "x"}, "hi-IN") is None
+    assert _extract_item_from_row(
+        {"audio_filepath": {"bytes": None, "path": "p"}, "text": "x"},
+        "hi-IN") is None
+    assert _extract_item_from_row(
+        {"audio_filepath": {"bytes": _fake_audio_bytes()}, "text": "   "},
+        "hi-IN") is None
+
+
+def _write_shard(path, rows):
+    """A parquet file shaped like a real IndicVoices shard."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    return str(path)
+
+
+def _corpus_over(monkeypatch, shard_path, dataset_id="test/dataset"):
     from dhvani.corpus import IndicVoicesCorpus
-
+    corpus = IndicVoicesCorpus(dataset_id=dataset_id)
     seen = {}
 
-    class MockDataset:
-        def __iter__(self):
-            yield {"audio": {"array": np.zeros(16000, dtype=np.float32),
-                             "sampling_rate": 16000},
-                   "text": "नमस्ते"}
-
-    def fake_load_dataset(dataset_id, config, **kwargs):
-        seen["dataset_id"] = dataset_id
+    def shard_names(config):
         seen["config"] = config
-        return MockDataset()
+        return ["shard-0.parquet"]
 
-    mock = types.ModuleType("datasets")
-    mock.load_dataset = fake_load_dataset
-    sys.modules["datasets"] = mock
-    try:
-        list(IndicVoicesCorpus().stream("kn-IN", limit=1))
-    finally:
-        del sys.modules["datasets"]
+    monkeypatch.setattr(corpus, "shard_names", shard_names)
+    monkeypatch.setattr(corpus, "local_shard", lambda name: shard_path)
+    return corpus, seen
 
-    assert seen["config"] == "kannada", f"asked for {seen['config']!r}"
+
+def test_stream_asks_for_the_mapped_config(tmp_path, monkeypatch):
+    """The language mapping has to be wired into stream(), not merely exist:
+    IndicVoices publishes "kannada", never "kn"."""
+    shard = _write_shard(tmp_path / "s.parquet", [{
+        "audio_filepath": {"bytes": _fake_audio_bytes(), "path": "a.wav"},
+        "text": "ನಮಸ್ಕಾರ", "speaker_id": "S1", "district": "D",
+    }])
+    corpus, seen = _corpus_over(monkeypatch, shard)
+
+    items = list(corpus.stream("kn-IN", limit=1))
+
+    assert seen["config"] == "kannada", f"asked for {seen.get('config')!r}"
+    assert len(items) == 1
+
+
+def test_a_shard_whose_columns_are_wrong_raises_rather_than_yielding_nothing():
+    """Silence is the dangerous failure here: an empty corpus produces an
+    empty scored.json, and the calibration reports having measured nothing
+    rather than that it could not read the data. The column names have
+    genuinely changed once already."""
+    import pytest as _pytest
+    from dhvani.corpus import SCHEMA_PROBE_ROWS
+    import tempfile, pathlib
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    shard = _write_shard(tmp / "bad.parquet", [
+        {"wrong_audio": "x", "wrong_text": "y"}
+        for _ in range(SCHEMA_PROBE_ROWS + 10)
+    ])
+
+    class _C:
+        pass
+    from dhvani.corpus import IndicVoicesCorpus
+    corpus = IndicVoicesCorpus(dataset_id="test/dataset")
+    corpus.shard_names = lambda config: ["s.parquet"]
+    corpus.local_shard = lambda name: shard
+
+    with _pytest.raises(ValueError) as exc:
+        list(corpus.stream("hi-IN", limit=10))
+    message = str(exc.value).lower()
+    assert "schema mismatch" in message
+    assert "actual row keys" in message
+
+
+def test_a_small_shard_that_yields_items_does_not_raise(tmp_path, monkeypatch):
+    """Fewer rows than the probe threshold must not be mistaken for a
+    broken schema."""
+    shard = _write_shard(tmp_path / "s.parquet", [{
+        "audio_filepath": {"bytes": _fake_audio_bytes(), "path": f"{i}.wav"},
+        "text": f"वाक्य {i}", "speaker_id": f"S{i}", "district": "D",
+    } for i in range(3)])
+    corpus, _ = _corpus_over(monkeypatch, shard)
+
+    items = list(corpus.stream("hi-IN", limit=10))
+    assert len(items) == 3
+
+
+def test_stream_stops_at_the_limit_without_fetching_more_shards(tmp_path, monkeypatch):
+    """Each shard is ~0.5 GB, so honouring the limit is a disk and bandwidth
+    guarantee, not just a correctness one."""
+    shard = _write_shard(tmp_path / "s.parquet", [{
+        "audio_filepath": {"bytes": _fake_audio_bytes(), "path": f"{i}.wav"},
+        "text": f"वाक्य {i}",
+    } for i in range(20)])
+
+    from dhvani.corpus import IndicVoicesCorpus
+    corpus = IndicVoicesCorpus(dataset_id="test/dataset")
+    fetched = []
+    corpus.shard_names = lambda config: ["a.parquet", "b.parquet", "c.parquet"]
+    corpus.local_shard = lambda name: (fetched.append(name), shard)[1]
+
+    items = list(corpus.stream("hi-IN", limit=5))
+
+    assert len(items) == 5
+    assert fetched == ["a.parquet"], f"downloaded more than needed: {fetched}"

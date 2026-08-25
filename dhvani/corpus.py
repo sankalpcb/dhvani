@@ -100,18 +100,57 @@ def _make_item(raw, src_rate, reference, lang, speaker_id, district) -> CorpusIt
     )
 
 
+def _decode_audio(audio: dict):
+    """(samples, rate) from a dataset audio cell, or None if unusable.
+
+    Two shapes, because the published data is not the shape this module was
+    written against. `datasets` hands back a DECODED {array, sampling_rate}
+    when its Audio feature is applied; a raw IndicVoices parquet row carries
+    the ENCODED file as {bytes, path}. Decoding the bytes here with
+    soundfile is also what keeps `torchcodec` out of the dependency set --
+    datasets>=4 refuses to decode audio without it.
+    """
+    array = audio.get("array")
+    if array is not None:
+        return np.asarray(array), audio["sampling_rate"]
+
+    blob = audio.get("bytes")
+    if blob:
+        import io
+
+        import soundfile as sf
+        samples, rate = sf.read(io.BytesIO(blob), dtype="float32")
+        return np.asarray(samples), rate
+    return None
+
+
 def _extract_item_from_row(row: dict, lang: str) -> CorpusItem | None:
     """Extract a CorpusItem from a dataset row, or None if fields are missing.
 
-    Tests the row against the expected field names: "audio", "text"/"transcript",
-    "speaker_id", "district". Returns None if required fields are absent.
+    IndicVoices names its audio column `audio_filepath`, not `audio`, and
+    carries the encoded file rather than a decoded array -- so every row
+    failed the old extraction and collect() would have died on its schema
+    probe even after the config name was fixed. Both column names and both
+    audio shapes are accepted now; `audio` first, since that is what the
+    other corpora and the tests supply.
+
+    Reference text likewise: IndicVoices publishes `text` alongside
+    `normalized` and `verbatim`. `text` is preferred and the others are
+    fallbacks, so a shard missing one still yields ground truth.
     """
-    audio = row.get("audio")
-    reference = row.get("text") or row.get("transcript") or ""
+    audio = row.get("audio") or row.get("audio_filepath")
+    reference = (row.get("text") or row.get("normalized")
+                 or row.get("verbatim") or row.get("transcript") or "")
     if not audio or not reference.strip():
         return None
+
+    decoded = _decode_audio(audio)
+    if decoded is None:
+        return None
+
+    samples, rate = decoded
     return _make_item(
-        audio["array"], audio["sampling_rate"], reference, lang,
+        samples, rate, reference, lang,
         row.get("speaker_id"), row.get("district"),
     )
 
@@ -166,43 +205,76 @@ class IndicVoicesCorpus:
     def __init__(self, dataset_id: str = DEFAULT_DATASET):
         self.dataset_id = dataset_id
 
+    def shard_names(self, config: str) -> list[str]:
+        """The parquet files for one language, in published order."""
+        from huggingface_hub import HfApi
+
+        files = HfApi().list_repo_files(self.dataset_id, repo_type="dataset")
+        return sorted(f for f in files
+                      if f.startswith(config + "/") and f.endswith(".parquet"))
+
+    def local_shard(self, name: str) -> str:
+        """Fetch one shard, returning its local path. Cached by the Hub."""
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(self.dataset_id, name, repo_type="dataset")
+
     def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
-        from datasets import load_dataset  # lazy: keeps the `data` extra optional
+        """Yield up to `limit` utterances for one language.
 
-        config = indicvoices_config(lang)  # "hi-IN" -> "hindi"
-        ds = load_dataset(self.dataset_id, config, split="train", streaming=True)
+        Reads downloaded parquet shards rather than `datasets` streaming.
+        Streaming was not merely slower -- it was unusable: 29 minutes of
+        load_dataset(streaming=True) yielded ZERO rows for hindi, on a link
+        that pulls a whole 0.5 GB shard in 39 seconds. Downloading the shard
+        and reading it with pyarrow turns the same work into one 39-second
+        fetch plus a local scan of 5,429 rows.
 
+        It also drops a dependency rather than adding one: datasets>=4
+        refuses to decode audio without `torchcodec`, and reading the
+        encoded bytes straight out of the parquet sidesteps that entirely
+        (see _decode_audio).
+
+        Shards are fetched lazily, one at a time, and only until `limit` is
+        met -- each is about 0.5 GB, so pulling all 83 for hindi would be
+        50 GB nobody asked for.
+        """
+        import pyarrow.parquet as pq
+
+        config = indicvoices_config(lang)
         count = 0
         rows_examined = 0
-        items_yielded = 0
         sample_row = None
 
-        for row in ds:
-            rows_examined += 1
-            if sample_row is None:
-                sample_row = row
-
+        for shard in self.shard_names(config):
             if count >= limit:
                 return
+            parquet = pq.ParquetFile(self.local_shard(shard))
 
-            item = _extract_item_from_row(row, lang)
-            if item is None:
-                # After SCHEMA_PROBE_ROWS rows with zero items, raise an exception
-                if rows_examined >= SCHEMA_PROBE_ROWS and items_yielded == 0:
-                    expected_fields = ["audio", "text/transcript", "speaker_id", "district"]
-                    actual_keys = list(sample_row.keys()) if sample_row else []
-                    raise ValueError(
-                        f"Dataset schema mismatch: examined {rows_examined} rows from "
-                        f"dataset '{self.dataset_id}' config '{config}', but no items produced. "
-                        f"Expected fields: {expected_fields}. Actual row keys: {actual_keys}"
-                    )
-                continue
+            for batch in parquet.iter_batches(batch_size=16):
+                for row in batch.to_pylist():
+                    if count >= limit:
+                        return
+                    rows_examined += 1
+                    if sample_row is None:
+                        sample_row = row
 
-            yield item
-            items_yielded += 1
-            count += 1
+                    item = _extract_item_from_row(row, lang)
+                    if item is None:
+                        # Fail loud on a schema that yields nothing at all,
+                        # rather than quietly returning an empty corpus --
+                        # the column names really did change once already.
+                        if rows_examined >= SCHEMA_PROBE_ROWS and count == 0:
+                            raise ValueError(
+                                f"Dataset schema mismatch: examined "
+                                f"{rows_examined} rows from dataset "
+                                f"'{self.dataset_id}' config '{config}', but "
+                                f"no items produced. Expected fields: "
+                                f"['audio' or 'audio_filepath', "
+                                f"'text/normalized/verbatim/transcript']. "
+                                f"Actual row keys: "
+                                f"{list(sample_row) if sample_row else []}"
+                            )
+                        continue
 
-            # Once we've yielded at least one item, the schema is correct
-            if items_yielded >= 1:
-                # Reset the probe so we don't raise later
-                rows_examined = 0
+                    yield item
+                    count += 1

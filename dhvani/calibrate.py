@@ -198,6 +198,26 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
     return chosen
 
 
+def calibration_source(dataset_id: str, lang: str) -> str:
+    """The segments.source_id a calibration run records.
+
+    Provenance for a human reading the store, not a key: nothing queries
+    segments by source_id, so this is kept readable rather than sanitized
+    or hashed the way ids.source_id has to be.
+
+    It used to be "calib:{lang}", which said which language a row was but
+    not which corpus produced it -- so a second dataset collected into the
+    same --db left rows indistinguishable from the first's.
+
+    Note the limit of this, which is inherent rather than an oversight: two
+    corpora containing byte-identical audio produce ONE segment row, since
+    segment_id is content-addressed and put_segment is INSERT OR IGNORE.
+    That row keeps whichever dataset reached it first, and that is correct
+    -- it really is one segment, with one reference and one hypothesis.
+    """
+    return f"calib:{dataset_id}:{lang}"
+
+
 def collect(corpus, make_tier0, store, langs, per_lang: int,
             pcm_cache_dir: str) -> list[dict]:
     """Phase 1: transcribe and score a corpus locally. Slow, free, resumable.
@@ -218,6 +238,10 @@ def collect(corpus, make_tier0, store, langs, per_lang: int,
     pcm_cache_dir is required, not optional: phase 2 has no other source for
     the audio (see DEFAULT_PCM_CACHE), so a collect run that quietly skipped
     caching would produce a scored.json that cannot be escalated.
+
+    corpus.dataset_id is recorded into each segment's source_id via
+    calibration_source(), so collecting a second dataset into one --db does
+    not leave rows that cannot be told apart.
     """
     scored: list[dict] = []
     seen: set[str] = set()
@@ -227,7 +251,8 @@ def collect(corpus, make_tier0, store, langs, per_lang: int,
         for item in corpus.stream(lang, limit=per_lang):
             save_pcm(pcm_cache_dir, item.segment_id, item.pcm)
 
-            store.put_segment(item.segment_id, f"calib:{lang}", 0,
+            store.put_segment(item.segment_id,
+                              calibration_source(corpus.dataset_id, lang), 0,
                               item.duration_ms, lang)
             store.put_reference(item.segment_id, item.reference, lang,
                                 item.speaker_id, item.district)

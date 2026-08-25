@@ -241,3 +241,117 @@ def test_write_table_separates_selected_from_escalated(tmp_path):
     meta = json.loads(path.read_text())["meta"]
     assert meta["segments_selected"] == 40
     assert meta["segments_escalated"] == 21
+
+
+# --- transient Tier 1 failures must not abandon a paid run ---
+
+class FlakyTier1(StubTier1):
+    """Fails `failures` times with a transient error, then succeeds.
+
+    Models the real fault that killed a live run at call 45 of 124: Google
+    returned `503 502:Bad Gateway`, escalate_selected had no retry, and the
+    whole batch aborted.
+    """
+
+    def __init__(self, failures, error=None):
+        self.failures = failures
+        self.calls = 0
+        self.error = error or RuntimeError("503 502:Bad Gateway")
+
+    def transcribe(self, segment):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return {"text": "chirp output", "signals": {}}
+
+
+def test_a_transient_tier1_failure_is_retried(store, tmp_path, monkeypatch):
+    """reconcile() survives a raising poll() by design; the synchronous
+    calibration path -- the one that spends money -- had nothing."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sel = _selected(1)
+    _seed_refs(store, sel)
+    flaky = FlakyTier1(failures=1)
+
+    rows = escalate_selected(sel, Recorded(flaky, "live", str(tmp_path / "f"), store),
+                             store, _segments(sel), "tier0|hi|m")
+
+    assert len(rows) == 1, "a transient failure must not lose the segment"
+    assert flaky.calls == 2, "must have retried exactly once"
+
+
+def test_one_flaky_segment_does_not_abandon_the_rest_of_the_batch(store, tmp_path,
+                                                                  monkeypatch):
+    """The 503 aborted 79 remaining segments. Every segment that CAN be
+    transcribed must be."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sel = _selected(3)
+    _seed_refs(store, sel)
+
+    rows = escalate_selected(sel, Recorded(FlakyTier1(failures=2), "live",
+                                           str(tmp_path / "f"), store),
+                             store, _segments(sel), "tier0|hi|m")
+
+    assert len(rows) == 3
+
+
+def test_a_persistently_failing_tier1_still_raises(store, tmp_path, monkeypatch):
+    """Bounded, not infinite: a backend that is genuinely down must surface,
+    not spin forever reserving spend on every attempt."""
+    from dhvani.calibrate import MAX_TIER1_ATTEMPTS
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sel = _selected(1)
+    _seed_refs(store, sel)
+    flaky = FlakyTier1(failures=999)
+
+    with pytest.raises(RuntimeError):
+        escalate_selected(sel, Recorded(flaky, "live", str(tmp_path / "f"), store),
+                          store, _segments(sel), "tier0|hi|m")
+
+    assert flaky.calls == MAX_TIER1_ATTEMPTS
+
+
+def test_a_budget_breach_is_never_retried(store, tmp_path, monkeypatch):
+    """BudgetExceeded is terminal, not transient. Retrying it would reserve
+    spend again on every attempt and hammer the ceiling that just refused."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sel = _selected(1)
+    _seed_refs(store, sel)
+    flaky = FlakyTier1(failures=999, error=BudgetExceeded("ceiling"))
+
+    with pytest.raises(BudgetExceeded):
+        escalate_selected(sel, flaky, store, _segments(sel), "tier0|hi|m")
+
+    assert flaky.calls == 1, "a ceiling refusal must fail immediately"
+
+
+def test_a_missing_pcm_cache_entry_is_never_retried(store, tmp_path, monkeypatch):
+    """Also terminal: the audio is not going to appear on attempt three."""
+    from dhvani.calibrate import PcmCacheMiss
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sel = _selected(1)
+    _seed_refs(store, sel)
+    flaky = FlakyTier1(failures=999, error=PcmCacheMiss("no pcm"))
+
+    with pytest.raises(PcmCacheMiss):
+        escalate_selected(sel, flaky, store, _segments(sel), "tier0|hi|m")
+
+    assert flaky.calls == 1
+
+
+def test_retries_back_off_between_attempts(store, tmp_path, monkeypatch):
+    """A tight loop against a struggling backend is its own denial of
+    service, and each attempt reserves spend."""
+    slept = []
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+    sel = _selected(1)
+    _seed_refs(store, sel)
+
+    escalate_selected(sel, Recorded(FlakyTier1(failures=2), "live",
+                                    str(tmp_path / "f"), store),
+                      store, _segments(sel), "tier0|hi|m")
+
+    assert len(slept) == 2, f"expected a pause per retry, got {slept}"
+    assert slept[1] > slept[0], f"backoff must grow: {slept}"

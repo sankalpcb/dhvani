@@ -23,6 +23,7 @@ from dhvani.delta_table import build as build_delta_table
 from dhvani.router import bucket_of
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import Segment
+from dhvani.store import BudgetExceeded
 
 # A bucket with fewer samples than this is OMITTED from the table rather
 # than included with a noisy average. Omission degrades to "do not
@@ -305,6 +306,55 @@ def estimate_cost(selected: list[dict]) -> float:
     return sum(cost_for_duration_ms(s["duration_ms"]) for s in selected)
 
 
+MAX_TIER1_ATTEMPTS = 3
+"""How many times one segment's Tier 1 call is attempted before giving up.
+
+A live run died at call 45 of 124 on a single `503 502:Bad Gateway`:
+escalate_selected had no retry at all, so one transient cloud hiccup
+abandoned the 79 segments behind it. reconcile() has carried per-job
+isolation and MAX_JOB_ATTEMPTS for exactly this since Phase 2 -- the
+synchronous calibration path, which is the one that spends money, had
+nothing.
+
+Bounded rather than generous on purpose: every attempt goes through
+Recorded, which reserves spend BEFORE the call, so attempts cost money
+whether or not the provider ultimately bills for a failed request. That
+over-reservation is the intended direction -- an overstated cost fails safe
+against the ceiling, an understated one breaches it -- but it is a reason to
+retry a few times, not many.
+"""
+
+TIER1_BACKOFF_SEC = 2.0
+"""Base delay between attempts, doubling each time.
+
+A tight retry loop against a struggling backend is its own denial of
+service, and would burn the attempt budget in milliseconds -- which is no
+help at all against an outage measured in seconds.
+"""
+
+
+def _transcribe_with_retry(tier1, segment, attempts: int = MAX_TIER1_ATTEMPTS):
+    """tier1.transcribe(), retried on transient failure.
+
+    BudgetExceeded and PcmCacheError are re-raised immediately. Both are
+    terminal, not transient: the ceiling will not move between attempts and
+    the audio will not appear, so retrying either would only reserve more
+    spend against a limit that just refused, or stall on a file that is not
+    coming back.
+    """
+    import time
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return tier1.transcribe(segment)
+        except (BudgetExceeded, PcmCacheError):
+            raise
+        except Exception:
+            if attempt == attempts:
+                raise
+            time.sleep(TIER1_BACKOFF_SEC * (2 ** (attempt - 1)))
+
+
 def escalate_selected(selected, tier1, store, segments_by_id,
                       tier0_variant: str = "") -> list[dict]:
     """Phase 2: run Tier 1 over the stratified sample and assemble rows.
@@ -323,7 +373,17 @@ def escalate_selected(selected, tier1, store, segments_by_id,
     patch out of dhvani/cli.py.
 
     A cached Tier 1 hypothesis is still reused without calling the backend
-    at all, so re-running a calibration pass re-charges nothing.
+    at all, so re-running a calibration pass re-charges nothing. That is what
+    makes an aborted run cheap to resume, and it is load-bearing: a live run
+    really did die partway and was resumed for the price of its remaining
+    segments.
+
+    Transient failures are retried (see MAX_TIER1_ATTEMPTS). Each attempt
+    goes through Recorded and therefore reserves spend again, so a segment
+    that fails twice before succeeding is charged three times. That is the
+    same deliberate over-reservation the rest of this path uses -- an
+    overstated cost fails safe against the ceiling, an understated one
+    breaches it -- and it is why the attempt budget is small.
 
     The Tier 0 cache key is read PER ITEM from the scored record collect()
     wrote (`tier0_variant`), falling back to the `tier0_variant` argument
@@ -351,7 +411,7 @@ def escalate_selected(selected, tier1, store, segments_by_id,
             # the reservation that enforces the ceiling happens inside
             # tier1.transcribe() (Recorded). See the docstring.
             cost = tier1.cost_per_call(segment)
-            result = tier1.transcribe(segment)
+            result = _transcribe_with_retry(tier1, segment)
             store.put_hypothesis(segment_id, "tier1", result["text"],
                                  result.get("signals", {}), cost, tier1.variant_key)
             tier1_text = result["text"]

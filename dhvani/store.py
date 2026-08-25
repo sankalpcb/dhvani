@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS tracks (
   created_at   INTEGER NOT NULL,
   PRIMARY KEY (source_id, version)
 );
+
+CREATE TABLE IF NOT EXISTS references_ (
+  segment_id  TEXT PRIMARY KEY,
+  reference   TEXT NOT NULL,
+  lang        TEXT NOT NULL,
+  speaker_id  TEXT,
+  district    TEXT,
+  created_at  INTEGER NOT NULL
+);
 """
 
 JOB_STATES = ("pending", "running", "done", "failed")
@@ -337,3 +346,29 @@ class Store:
             (source_id,)
         ).fetchone()
         return int(row["v"])
+
+    def put_reference(self, segment_id, reference, lang,
+                      speaker_id=None, district=None) -> bool:
+        """Ground-truth transcript for a calibration segment.
+
+        Empty in production; populated only by the calibration harness.
+        Idempotent by primary key, matching every other write in this store.
+        """
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO references_ "
+            "(segment_id, reference, lang, speaker_id, district, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (segment_id, reference, lang, speaker_id, district, int(time.time())),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def get_reference(self, segment_id):
+        row = self.conn.execute(
+            "SELECT reference, lang, speaker_id, district FROM references_ "
+            "WHERE segment_id = ?", (segment_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"reference": row["reference"], "lang": row["lang"],
+                "speaker_id": row["speaker_id"], "district": row["district"]}

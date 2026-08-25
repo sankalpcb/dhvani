@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Kept honest by `tests/test_plan_docs.py`.** Every `def` and `class` this
+> plan declares under a `# path/to/file.py` heading is checked against that
+> file's real signature on each test run, so the plan cannot quietly describe
+> an interface the code has moved on from. What is checked is names and
+> parameters. The code inside each block is still an ABBREVIATED proposal,
+> not a copy of the file, and the prose around it still records what was
+> planned rather than what shipped — read the source for the full story.
+
 **Goal:** Make Tier 1 escalation asynchronous — publish a caption track immediately, submit an escalation batch, and reconcile results that arrive later, out of order, partially, or twice — with the correctness properties proven under injected failure.
 
 **Architecture:** A new `AsyncBackend` protocol (`submit` returns a job id, `poll` returns results or `None`) sits beside Phase 1's synchronous `Backend`. Jobs and versioned tracks are persisted in SQLite. A pure `merge_entries()` folds arriving results into a track by `segment_id`, so re-applying a batch is a database-level no-op. A `ChaosBackend` wrapper injects timeouts, 429s, 500s, partial batches, duplicate deliveries and reordering, and the invariant suite asserts no loss, idempotent merge, and convergence to the synchronous result.
@@ -29,45 +37,58 @@
 # dhvani/pipeline.py
 @dataclass(frozen=True)
 class TrackEntry:
-    segment_id: str; t_start_ms: int; t_end_ms: int
-    text: str; risk: float; band: str
-def band_of(risk: float) -> str                      # "ship" | "marked" | "review"
-def run(pcm, source_id, tier0, store, delta_table, budget_usd) -> list[TrackEntry]
+    segment_id: str
+    t_start_ms: int
+    t_end_ms: int
+    text: str
+    risk: float
+    band: str
+
+def band_of(risk: float) -> str: ...  # "ship" | "marked" | "review"
+def run(pcm: np.ndarray, source_id: str, tier0, store, delta_table: dict, budget_usd: float, samples: dict | None=None) -> list[TrackEntry]: ...  # samples: optional timing collector
 
 # dhvani/router.py
 @dataclass(frozen=True)
 class Candidate:
-    segment_id: str; tier: str; risk: float; cost_usd: float; delta: float
-def plan(candidates: list[Candidate], budget_usd: float) -> list[Candidate]
-def delta_for(risk: float, tier: str, delta_table: dict) -> float
+    segment_id: str
+    tier: str
+    risk: float
+    cost_usd: float
+    delta: float
+
+def plan(candidates: list[Candidate], budget_usd: float) -> list[Candidate]: ...
+def delta_for(risk: float, tier: str, delta_table: dict) -> float: ...
 
 # dhvani/store.py
-class Store:                                          # context manager
-    def __init__(self, path: str, timeout: float = 30.0)
-    def put_segment(self, segment_id, source_id, t_start_ms, t_end_ms, lang_hint=None)
-    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd, variant_key="") -> bool
-    def get_hypothesis(self, segment_id, tier, variant_key="") -> dict | None
-    def reserve_spend(self, tier: str, cost_usd: float) -> None   # atomic; raises BudgetExceeded
-    def total_spend(self) -> float
-class BudgetExceeded(RuntimeError)
+class Store:  # context manager
+    def __init__(self, path: str, timeout: float=30.0): ...
+    def put_segment(self, segment_id, source_id, t_start_ms, t_end_ms, lang_hint=None): ...
+    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd, variant_key: str='') -> bool: ...
+    def get_hypothesis(self, segment_id, tier, variant_key: str=''): ...
+    def reserve_spend(self, tier: str, cost_usd: float) -> None: ...  # atomic; raises BudgetExceeded
+    def total_spend(self) -> float: ...
+
+class BudgetExceeded(RuntimeError): ...
 
 # dhvani/ids.py
-def segment_id(pcm) -> str
-def hypothesis_key(tier: str, variant_key: str = "") -> str
-def variant_slug(variant_key: str = "") -> str
+def segment_id(pcm: np.ndarray) -> str: ...
+def source_id(name: str, pcm: np.ndarray) -> str: ...  # legible name + content digest
+def hypothesis_key(tier: str, variant_key: str='') -> str: ...
+def variant_slug(variant_key: str='') -> str: ...
 
 # dhvani/backends/base.py
 class Backend(Protocol):
-    name: str; variant_key: str
-    def cost_per_call(self, segment) -> float
-    def transcribe(self, segment) -> dict          # {"text": str, "signals": dict}
+    name: str
+    variant_key: str
+    def cost_per_call(self, segment) -> float: ...
+    def transcribe(self, segment) -> dict: ...  # {"text": str, "signals": dict}
 
 # dhvani/backends/tier1_chirp.py
-def cost_for_duration_ms(duration_ms: int) -> float
+def cost_for_duration_ms(duration_ms: int) -> float: ...
 
 # dhvani/scorer.py
-def extract(text, decoder_signals, duration_ms) -> Features
-def risk(features) -> float
+def extract(text: str, decoder_signals: dict, duration_ms: int) -> Features: ...
+def risk(f: Features) -> float: ...
 ```
 
 ---
@@ -809,30 +830,49 @@ a crash between submission and accounting would otherwise under-count and
 let the USD 20 ceiling be breached on restart.
 """
 
-from dhvani.backends.tier1_chirp import cost_for_duration_ms
 from dhvani.router import Candidate, delta_for, plan
 
 
-def _duration_ms(segment) -> int:
-    return segment.t_end_ms - segment.t_start_ms
+def _outstanding(source_id, backend, store):
+    """segment_ids this backend already has in flight for this source."""
+    return {
+        segment_id
+        for job in store.open_jobs(source_id)
+        if job["tier"] == backend.name
+        and job["variant_key"] == backend.variant_key
+        for segment_id in job["segment_ids"]
+    }
 
 
-def escalate(entries, segments, backend, store, delta_table, budget_usd):
+def escalate(source_id, entries, segments, backend, store, delta_table,
+             budget_usd):
     """Plan escalations, reserve their cost, and submit them. Returns job id.
 
     segments maps segment_id -> Segment. Real Segment objects are required,
     not stubs: Tier1Chirp.transcribe() reads segment.pcm.
     """
+    outstanding = _outstanding(source_id, backend, store)
+
     candidates = [
         Candidate(
             segment_id=e.segment_id,
             tier="tier1",
             risk=e.risk,
-            cost_usd=cost_for_duration_ms(_duration_ms(segments[e.segment_id])),
+            # Through the backend, not cost_for_duration_ms() directly:
+            # Recorded.cost_per_call() is 0.0 in replay, so pricing at the
+            # live rate made a replay run reserve real dollars.
+            cost_usd=backend.cost_per_call(segments[e.segment_id]),
             delta=delta_for(e.risk, "tier1", delta_table),
         )
         for e in entries
         if e.segment_id in segments
+        # Already in flight, or already delivered and paid for. Without
+        # both, re-running --escalate re-reserved the whole batch every
+        # time: submit() is content-addressed and put_job() is INSERT OR
+        # IGNORE, so it bought nothing.
+        and e.segment_id not in outstanding
+        and store.get_hypothesis(e.segment_id, backend.name,
+                                 variant_key=backend.variant_key) is None
     ]
 
     chosen = plan(candidates, budget_usd)
@@ -1012,7 +1052,7 @@ from dhvani.scorer import extract, risk as compute_risk
 from dhvani.track import entries_from_json, entries_to_json, merge_entries
 
 
-def reconcile(source_id: str, backend, store) -> int:
+def reconcile(source_id: str, backend, store, samples: dict | None=None) -> int:
     """Merge any completed jobs for this backend. Returns the latest version."""
     version = store.latest_track_version(source_id)
     if version == 0:
@@ -1405,7 +1445,7 @@ def test_i2_reconciling_a_settled_job_repeatedly_is_a_no_op(store):
     assert store.get_track("vid1", version)["content_json"] == before
 
 
-def test_i6_async_converges_to_the_synchronous_result(store, tmp_path):
+def test_i6_async_converges_to_the_synchronous_result(store):
     """The headline property: once everything settles, async == sync."""
     backend = ChaosBackend(SyncAsyncAdapter(StubSync(), pending_polls=2),
                            faults=("partial", "reorder", "duplicate"), seed=3)

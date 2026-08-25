@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Kept honest by `tests/test_plan_docs.py`.** Every `def` and `class` this
+> plan declares under a `# path/to/file.py` heading is checked against that
+> file's real signature on each test run, so the plan cannot quietly describe
+> an interface the code has moved on from. What is checked is names and
+> parameters. The code inside each block is still an ABBREVIATED proposal,
+> not a copy of the file, and the prose around it still records what was
+> planned rather than what shipped — read the source for the full story.
+
 **Goal:** Build the synchronous half of the Dhvani caption cascade — content-addressed segmentation, Tier 0 ASR, a deterministic risk scorer, a budget-constrained router, and a toWER evaluator — producing a reproducible cost/quality frontier.
 
 **Architecture:** A pipeline of small, mostly-pure Python modules over a SQLite store. Audio is split by VAD into content-addressed segments (`SHA256` of normalized PCM), transcribed by a local IndicConformer model, scored by a deterministic weighted risk function, and routed for escalation by a pure greedy-knapsack policy under a budget. All external calls go through a record/replay `Backend` layer so the entire test suite runs offline at zero cost.
@@ -366,7 +374,7 @@ class BudgetExceeded(RuntimeError):
 
 
 class Store:
-    def __init__(self, path: str):
+    def __init__(self, path: str, timeout: float=30.0):
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
@@ -389,7 +397,7 @@ class Store:
         )
         self.conn.commit()
 
-    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd) -> bool:
+    def put_hypothesis(self, segment_id, tier, text, signals, cost_usd, variant_key: str='') -> bool:
         """Returns True if newly inserted, False if already present (no-op)."""
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO hypotheses "
@@ -401,7 +409,7 @@ class Store:
         self.conn.commit()
         return cur.rowcount == 1
 
-    def get_hypothesis(self, segment_id, tier):
+    def get_hypothesis(self, segment_id, tier, variant_key: str=''):
         row = self.conn.execute(
             "SELECT text, signals_json, cost_usd FROM hypotheses "
             "WHERE segment_id = ? AND tier = ?",
@@ -834,7 +842,7 @@ def test_risk_is_bounded():
     assert 0.0 <= risk(Features(-1.0, -1.0, 0.0, 0.0, 0.0)) <= 1.0
 
 
-def test_risk_is_monotonic_in_each_feature():
+def test_risk_is_monotonic_in_each_live_feature():
     base = risk(ZERO)
     for i in range(5):
         vals = [0.0] * 5
@@ -1111,7 +1119,7 @@ from dhvani.store import Store, BudgetExceeded
 class FakeBackend:
     name = "fake"
 
-    def __init__(self):
+    def __init__(self, variant_key='lang=hi'):
         self.calls = 0
 
     def cost_per_call(self, segment):
@@ -1328,7 +1336,7 @@ def test_same_word_in_two_indic_scripts_collapses():
     assert to_wer(deva, mala) == 0.0
 
 
-def test_benign_script_variance_is_penalized_less_than_plain_wer():
+def test_loanword_script_variance_is_no_worse_than_plain_wer():
     """Spec 1.3: toWER must not treat a script flip like a semantic error."""
     ref = "deployment अभी pending है"
     benign = "ഡിപ്ലോയ്‌മെന്റ് अभी pending है"
@@ -1766,8 +1774,7 @@ def band_of(risk: float) -> str:
     return "review"
 
 
-def run(pcm: np.ndarray, source_id: str, tier0, store,
-        delta_table: dict, budget_usd: float) -> list[TrackEntry]:
+def run(pcm: np.ndarray, source_id: str, tier0, store, delta_table: dict, budget_usd: float, samples: dict | None=None) -> list[TrackEntry]:
     """Produce a caption track. Cached segments are never re-transcribed.
 
     delta_table and budget_usd are accepted for interface stability but are
@@ -1943,11 +1950,11 @@ from dhvani.pipeline import TrackEntry
 from dhvani.report import frontier
 
 
-def _entry(sid, risk):
+def _entry(sid, risk, duration_ms=3000):
     return TrackEntry(sid, 0, 3000, "text", risk, "marked")
 
 
-def test_frontier_is_monotonic_in_budget():
+def test_frontier_total_delta_is_monotonic_in_budget():
     entries = [_entry(f"s{i}", 0.65) for i in range(10)]
     table = {"tier1": {"0.6-0.7": 18.0}}
     rows = frontier(entries, table, budgets=[0.0, 0.001, 0.01, 1.0])
@@ -2299,7 +2306,7 @@ class Tier1Chirp:
         return {"text": str(text), "signals": {}}
 
 
-def _default_client():
+def _default_client(recognizer: str=''):
     """Thin adapter over SpeechClient exposing recognize_pcm(pcm, lang) -> str."""
     from google.cloud.speech_v2 import SpeechClient
     from google.cloud.speech_v2.types import cloud_speech as cs

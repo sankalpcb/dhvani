@@ -28,6 +28,44 @@ def segment_id(pcm: np.ndarray) -> str:
     return hashlib.sha256(pcm.tobytes()).hexdigest()
 
 
+def source_id(name: str, pcm: np.ndarray) -> str:
+    """Identity for one audio source: a legible name plus a content digest.
+
+    dhvani/cli.py used os.path.basename(audio) alone, so a/clip.wav and
+    b/clip.wav were ONE source inside a single --db -- one track history and
+    one job namespace. Escalating one could surface in the other's output,
+    and reconcile() polled across both as if they were the same video.
+
+    Shaped like variant_slug() and for the same reason: a sanitized,
+    length-capped prefix so a human reading the segments or jobs table can
+    tell which file a row came from, plus a digest so two sources that
+    sanitize to the same text still differ. The digest covers the
+    UNsanitized name as well as the audio, because sanitizing is lossy --
+    "a b.wav" and "a/b.wav" collapse to the same safe text.
+
+    Audio identity comes from segment_id(), so it is the same hash over the
+    same normalized bytes that identifies every segment, and it inherits
+    that function's rejection of float or multi-channel input. Two files
+    whose audio decodes to identical PCM therefore agree here exactly when
+    they already agree at the segment level.
+
+    Only the basename is passed in, never the directory: re-running the
+    same clip from a different working directory must find its own track
+    rather than start a new one.
+
+    Note what this does NOT do: renaming a file changes its source_id and
+    so starts a fresh track history. That costs a stale row, not money --
+    hypotheses are keyed by (segment_id, tier, variant), not by source, so
+    escalate() still sees the old results as already paid for and will not
+    re-buy them.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.") or "source"
+    digest = hashlib.sha256(
+        segment_id(pcm).encode("utf-8") + b"\x00" + name.encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{safe[:48]}-{digest}"
+
+
 def _policy_variant(variant_key: str) -> str:
     """POLICY_ID + backend variant: everything besides the audio and the
     tier that determines what a hypothesis says.

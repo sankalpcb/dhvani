@@ -190,13 +190,63 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
         by_bucket[bucket_of(item["risk"])].append(item)
 
     chosen: list[dict] = []
+    speakers_taken: set = set()
     for bucket in sorted(by_bucket):
         members = by_bucket[bucket]
         if len(members) < MIN_BUCKET_SAMPLES:
             continue
         members.sort(key=lambda i: i["segment_id"])
-        chosen.extend(members[:n_per_bucket])
+
+        # Spec §9.4: speaker-disjoint. One speaker contributing many
+        # utterances lets the risk function learn speaker identity as a
+        # difficulty proxy, and then "all reported numbers are fiction".
+        # Enforced HERE rather than upstream because this is the only point
+        # that knows what was actually selected -- the thing disjoint_by's
+        # docstring says it guards ("the SELECTED set, not merely what was
+        # requested").
+        #
+        # The floor check above deliberately reads len(members), not the
+        # post-filter count: MIN_BUCKET_SAMPLES asks whether the bucket has
+        # enough evidence to publish, and dropping duplicate speakers from a
+        # qualifying bucket does not retract that.
+        #
+        # A None speaker_id is not a collision (matching disjoint_by), which
+        # also keeps this backward compatible with the committed
+        # results/scored.json, written before collect() recorded the field.
+        taken_here = 0
+        for item in members:
+            if taken_here >= n_per_bucket:
+                break
+            speaker = item.get("speaker_id")
+            if speaker is not None:
+                if speaker in speakers_taken:
+                    continue
+                speakers_taken.add(speaker)
+            chosen.append(item)
+            taken_here += 1
     return chosen
+
+
+def district_spread(selected: list[dict]) -> dict[str, int]:
+    """How many selected samples fall in each district.
+
+    A DIAGNOSTIC, deliberately not a gate. Spec §9.4 asks for
+    district-disjointness alongside speaker-disjointness, but that is
+    unachievable by pigeonhole at calibration scale: IndicVoices spans 145
+    districts and a standard run selects ~150 samples, so at least one
+    district must repeat. Enforcing it would make calibration unrunnable
+    rather than more honest.
+
+    What it is good for is spotting concentration -- a table built almost
+    entirely from two districts is a result worth qualifying, and this is
+    the number that says so.
+    """
+    spread: dict[str, int] = {}
+    for row in selected:
+        district = row.get("district")
+        if district is not None:
+            spread[district] = spread.get(district, 0) + 1
+    return spread
 
 
 def calibration_source(dataset_id: str, lang: str) -> str:
@@ -284,6 +334,15 @@ def collect(corpus, make_tier0, store, langs, per_lang: int,
                 "risk": compute_risk(features),
                 "lang": lang,
                 "duration_ms": item.duration_ms,
+                # Spec §9.4 metadata, carried so stratify() can enforce
+                # speaker-disjointness on what it SELECTS. Both are already
+                # persisted by put_reference() above, but that store row is
+                # not what selection reads -- and recording them there while
+                # omitting them here is precisely why disjoint_by() sat
+                # unused: the data existed and never reached the point that
+                # needed it.
+                "speaker_id": item.speaker_id,
+                "district": item.district,
                 # The Tier 0 cache key this hypothesis was stored under.
                 # Persisted rather than re-derived in phase 2: the two
                 # phases are separate processes, possibly days apart, and

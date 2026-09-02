@@ -637,3 +637,23 @@ def test_escalate_builds_one_tier1_per_language(tmp_path, monkeypatch):
     )
     assert len(_RecordingTier1.seen) == 50, "every segment must still be sent"
     assert json.loads(out.read_text())["meta"]["languages"] == ["hi-IN", "kn-IN"]
+
+
+def test_the_histogram_reports_speaker_and_district_concentration(capsys):
+    """Spec §9.4 concentration is what a human is looking FOR when they read
+    this histogram before authorizing spend. Speaker-disjointness is enforced
+    silently by stratify(); district concentration cannot be enforced (145
+    districts, ~150 samples) so it has to be shown."""
+    from dhvani.calibrate import MIN_BUCKET_SAMPLES
+    from dhvani.cli_calibrate import _print_histogram
+
+    scored = [{"segment_id": f"s{i:04d}" + "0" * 58, "risk": 0.05,
+               "speaker_id": f"spk{i}", "district": "D1" if i < 3 else "D2"}
+              for i in range(MIN_BUCKET_SAMPLES)]
+
+    _print_histogram(scored)
+    err = capsys.readouterr().err
+
+    assert "speakers" in err
+    assert "districts" in err
+    assert "D2" in err, "the dominant district should be named"

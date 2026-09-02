@@ -18,6 +18,7 @@ import sys
 from dhvani.calibrate import (
     DEFAULT_PCM_CACHE,
     MIN_BUCKET_SAMPLES,
+    district_spread,
     LazySegments,
     NoMeasuredBuckets,
     PcmCacheError,
@@ -49,6 +50,27 @@ def _print_histogram(scored, stream=None):
         # that it contributed nothing to the escalated sample.
         marker = "" if count >= MIN_BUCKET_SAMPLES else "  (below floor, not escalated)"
         print(f"  {bucket:10} {count:6d}  {bar}{marker}", file=stream)
+
+    # Spec §9.4 concentration. This is a large part of what a human is
+    # looking FOR when they read this histogram before authorizing spend:
+    # a table built mostly from a handful of speakers or districts measures
+    # those people, not the language.
+    #
+    # The two are reported differently because only one can be enforced.
+    # stratify() guarantees speaker-disjointness silently, so the speaker
+    # line is a statement of what WILL be escalated. District-disjointness
+    # is impossible by pigeonhole -- IndicVoices spans 145 districts and a
+    # run selects ~150 samples -- so concentration there is shown and left
+    # to judgement rather than gated.
+    speakers = {row.get("speaker_id") for row in scored if row.get("speaker_id")}
+    spread = district_spread(scored)
+    if speakers:
+        print(f"  {len(speakers)} distinct speakers across {len(scored)} segments "
+              f"(escalation takes at most one per speaker)", file=stream)
+    if spread:
+        top = sorted(spread.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        summary = ", ".join(f"{name} x{n}" for name, n in top)
+        print(f"  {len(spread)} districts; most common: {summary}", file=stream)
 
 
 def main(argv=None) -> int:

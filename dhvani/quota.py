@@ -74,6 +74,11 @@ class RateLimited(RuntimeError):
 # https://ai.google.dev/gemini-api/docs/rate-limits  (checked 2026-09-02)
 QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 
+# Conservative pacing figure, not a measured ceiling -- the vendor does
+# not publish free-tier RPM. The bucket smooths bursts; the daily cap is
+# what actually fails closed.
+GEMINI_RPM_DEFAULT = 15
+
 
 def quota_day(now=None) -> str:
     """The quota day key, on Google's reset boundary.

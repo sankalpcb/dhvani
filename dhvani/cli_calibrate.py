@@ -26,9 +26,11 @@ from dhvani.calibrate import (
     escalate_selected,
     estimate_cost,
     histogram,
+    repair_selected,
     stratify,
     write_table,
 )
+from dhvani.config import GEMINI_DAILY_QUOTA
 from dhvani.store import Store
 
 DEFAULT_LANGS = ["kn-IN", "ml-IN", "hi-IN"]
@@ -118,6 +120,29 @@ def main(argv=None) -> int:
     e.add_argument("--confirm", action="store_true",
                    help="required before any paid call")
 
+    r = sub.add_parser("repair",
+                       help="phase 3: run Tier 2 over the sample (free tier)")
+    r.add_argument("--db", default="calibration.db")
+    r.add_argument("--scored-in", default="scored.json")
+    r.add_argument("--out", default="delta_table_tier2.json",
+                   help="written separately from the Tier 1 table by default: "
+                        "merging them is a decision, not a side effect")
+    r.add_argument("--mode", default=os.environ.get("DHVANI_MODE", "replay"),
+                   choices=["replay", "record", "live"])
+    r.add_argument("--fixtures", default="fixtures")
+    r.add_argument("--quota", type=int, default=GEMINI_DAILY_QUOTA,
+                   help="daily request ceiling for this run (local, not the "
+                        "vendor's -- see the design, §8)")
+    r.add_argument("--lang", default="hi-IN")
+    r.add_argument("--tier1-variant", default="",
+                   help="if set, a segment with a Tier 1 hypothesis under this "
+                        "key is repaired FROM it, and scored against it")
+    r.add_argument("--dry-run", action="store_true",
+                   help="stratify, print the plan, and exit without calling")
+    # Deliberately NO --confirm. Tier 1 has one because it bills; Tier 2 is
+    # free, so the same ceremony would be cargo-cult rather than a guard.
+    # The quota budget is printed instead, which is the resource at stake.
+
     args = ap.parse_args(argv)
 
     if args.cmd == "collect":
@@ -141,6 +166,9 @@ def main(argv=None) -> int:
             json.dump(scored, fh, indent=2)
         print(f"wrote {args.scored_out}", file=sys.stderr)
         return 0
+
+    if args.cmd == "repair":
+        return _run_repair(args)
 
     # escalate
     try:
@@ -230,3 +258,93 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+class _TextSegment:
+    """The minimum a text-only tier needs: an id and its timings.
+
+    Deliberately not a Segment -- it carries no pcm, so an accidental
+    attempt to send audio from the repair path fails loudly here rather
+    than silently transmitting zeros.
+    """
+
+    __slots__ = ("segment_id", "t_start_ms", "t_end_ms")
+
+    def __init__(self, scored_row):
+        self.segment_id = scored_row["segment_id"]
+        self.t_start_ms = 0
+        self.t_end_ms = int(scored_row.get("duration_ms", 0))
+
+
+def _run_repair(args) -> int:
+    """Phase 3: measure a Tier 2 delta over the stratified sample.
+
+    Deliberately unlike phase 2 in three ways, each following from Tier 2
+    being free rather than paid:
+
+      no --confirm      nothing is billed, so a spend gate would be ceremony.
+                        The QUOTA is printed instead, because that is the
+                        resource a run can actually exhaust.
+      no cost estimate  there is no cost. The plan states request count
+                        against the daily ceiling.
+      separate --out    the Tier 2 table is written beside the Tier 1 one,
+                        not merged into it. Merging two independently
+                        measured tables is a decision a human should make,
+                        not something a calibration command does quietly.
+    """
+    try:
+        with open(args.scored_in, encoding="utf-8") as fh:
+            scored = json.load(fh)
+    except FileNotFoundError:
+        print(f"missing {args.scored_in}; run `dhvani-calibrate collect` first",
+              file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"{args.scored_in} is not valid JSON: {exc}", file=sys.stderr)
+        return 1
+
+    selected = stratify(scored)
+    _print_histogram(scored)
+    print(f"stratified {len(selected)} segments; "
+          f"needs at most {len(selected)} of {args.quota} daily quota "
+          f"(Tier 2 is free -- quota is the only budget)", file=sys.stderr)
+
+    if args.dry_run:
+        print("dry run: nothing called, no table written", file=sys.stderr)
+        return 0
+
+    from dhvani.backends.base import Recorded
+    from dhvani.backends.tier2_gemini import Tier2Gemini
+    from dhvani.quota import GEMINI_RPM_DEFAULT, QuotaGate, TokenBucket
+
+    hypotheses: dict = {}
+    with Store(args.db) as store:
+        tier2 = Recorded(
+            Tier2Gemini(hypothesis_source=hypotheses.get, lang=args.lang),
+            args.mode, args.fixtures, store,
+        )
+        gate = QuotaGate(store=store, tier=tier2.name, cap=args.quota,
+                         bucket=TokenBucket(capacity=max(1, GEMINI_RPM_DEFAULT),
+                                            refill_per_sec=GEMINI_RPM_DEFAULT / 60.0))
+        # NOT LazySegments. Tier 2 is text-in, text-out: Tier2Gemini reads
+        # segment.segment_id and nothing else, so loading phase 1's cached
+        # PCM would demand audio this tier never looks at -- and would make
+        # phase 3 impossible whenever that cache is gone, which is precisely
+        # the situation this project is in. Tier 1 needs LazySegments because
+        # Tier1Chirp sends the PCM inline; the requirement does not transfer.
+        segments = {s["segment_id"]: _TextSegment(s) for s in selected}
+        rows = repair_selected(selected, tier2, store, gate, hypotheses,
+                               segments, tier1_variant=args.tier1_variant)
+        used = store.quota_used(tier2.name, gate._today())
+
+    if len(rows) < len(selected):
+        print(f"measured {len(rows)} of {len(selected)} selected "
+              f"({used} requests used) -- re-run to continue where this "
+              f"stopped; cached repairs cost no quota", file=sys.stderr)
+
+    write_table(rows, selected, args.out, 0.0,
+                sorted({s.get("lang") for s in selected if s.get("lang")}),
+                tier="tier2")
+    print(f"wrote {args.out} from {len(rows)} rows; spent $0.00 "
+          f"({used} free-tier requests)", file=sys.stderr)
+    return 0

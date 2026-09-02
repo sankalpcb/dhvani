@@ -69,7 +69,7 @@ def bucket_of(risk: float) -> str: ...  # "0.6-0.7"; clamps to [0,1]
 N_BUCKETS: int
 
 # dhvani/delta_table.py
-def build(rows: list[dict]) -> dict: ...  # rows: {risk, reference, tier0_text, tier1_text}
+def build(rows: list[dict], tier: str = "tier1") -> dict: ...  # rows: {risk, reference, tier0_text, <tier>_text, before_text?}
 
 # dhvani/backends/base.py
 class Recorded:  # mode in record|replay|live

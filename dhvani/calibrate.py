@@ -24,6 +24,7 @@ from dhvani.quota import QuotaExhausted, RateLimited
 from dhvani.router import bucket_of
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import Segment
+from dhvani.backends.base import FixtureMissing
 from dhvani.store import BudgetExceeded
 
 # A bucket with fewer samples than this is OMITTED from the table rather
@@ -577,6 +578,22 @@ Not a backoff: the bucket refills at a known rate, so this is simply the
 interval at which a batch re-offers work it was told was too early.
 """
 
+MAX_TIER2_ATTEMPTS = 4
+"""Attempts per segment against a transient vendor refusal.
+
+Four rather than three: the free tier's 429 is a per-MINUTE pacing refusal
+(measured limit: 15 requests/minute for gemini-3.5-flash-lite), so the
+backoff below has to be able to outlast a whole window.
+"""
+
+TIER2_BACKOFF_SEC = 8.0
+"""Base delay, doubling. 8 -> 16 -> 32 covers a 60-second quota window.
+
+Larger than Tier 1's 2.0s because that retries a server hiccup, while this
+waits out a fixed-window quota that will not clear early no matter how
+politely it is asked.
+"""
+
 MAX_PACING_WAITS = 60
 """Bound on consecutive waits for ONE segment.
 
@@ -615,6 +632,7 @@ def repair_selected(selected, tier2, store, gate, hypotheses: dict,
     knows which upstream text a given segment should be repaired from.
     """
     rows: list[dict] = []
+    outcome_deferred: list[str] = []
 
     for item in selected:
         segment_id = item["segment_id"]
@@ -657,7 +675,37 @@ def repair_selected(selected, tier2, store, gate, hypotheses: dict,
             if not granted:
                 break
             hypotheses[segment_id] = before_text
-            result = tier2.transcribe(segments_by_id[segment_id])
+
+            # The vendor's own refusal must not end the run. A live pass died
+            # at segment 30 of 100 on a 429 that propagated out of
+            # transcribe() -- our local counter said there was quota left,
+            # and Google disagreed. dhvani/repair.py (the pipeline path)
+            # already degraded on backend errors; this path did not, so the
+            # same lesson had to be learned twice.
+            #
+            # Retried rather than immediately deferred, because 429 here is
+            # a PACING refusal that clears in seconds -- Google returns a
+            # retryDelay with it -- and a calibration run wants all 100
+            # segments, not a partial table it has to explain.
+            result = None
+            for attempt in range(1, MAX_TIER2_ATTEMPTS + 1):
+                try:
+                    result = tier2.transcribe(segments_by_id[segment_id])
+                    break
+                except FixtureMissing:
+                    # Replay never falls back to live, and a missing fixture
+                    # is a hard error by design: degrading here would let an
+                    # offline mistake masquerade as "nothing to measure".
+                    raise
+                except Exception:
+                    if attempt == MAX_TIER2_ATTEMPTS:
+                        break
+                    (sleep or _default_sleep)(
+                        TIER2_BACKOFF_SEC * (2 ** (attempt - 1)))
+            if result is None:
+                outcome_deferred.append(segment_id)
+                continue
+
             store.put_hypothesis(segment_id, tier2.name, result["text"],
                                  result.get("signals", {}), 0.0,
                                  tier2.variant_key)

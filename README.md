@@ -10,7 +10,7 @@ produces the evidence it consults.
 ```bash
 git clone <this repo> && cd Youtube
 uv sync --extra dev           # pytest only — no ML dependencies needed
-make test                     # 397 tests, offline
+make test                     # 404 tests, offline (4 skip without the data extra)
 make track                    # captions a real Hindi clip, no model, no network
 ```
 
@@ -98,7 +98,7 @@ crash cannot under-count and let the $20 ceiling be breached on restart.
 ## Running it offline
 
 ```bash
-make test    # 397 tests: no torch, no cloud SDK, no credentials, no network
+make test    # 404 tests: no torch, no cloud SDK, no credentials, no network
 make track   # captions samples/fleurs-hi-*.wav from committed fixtures
 make bench   # cost/quality frontier from the measured delta table
 ```
@@ -156,7 +156,7 @@ high-risk segments, because none occurred.
 
 ```
 dhvani/            28 modules — segmenter, scorer, router, escalate, reconcile, store, CLIs
-tests/             31 files, 397 tests
+tests/             31 files, 404 tests
 fixtures/          committed replay fixtures (Tier 0 and Tier 1)
 samples/           committed demo audio + attribution; the illustrative delta table
 docs/superpowers/  design spec and the three implementation plans

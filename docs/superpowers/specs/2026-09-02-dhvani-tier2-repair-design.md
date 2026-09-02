@@ -144,10 +144,18 @@ consolidated for exactly this reason and `reserve_quota()` must not reintroduce 
 Reservation happens **before** the call, so a crash between reserving and calling over-counts
 by one request. Over-counting quota fails safe in the same direction as over-reserving spend.
 
-`day` is a UTC date string. Google's reset boundary is a published-pricing detail, not an
-account fact, but it is also **not verified here** — see §8. UTC is the assumption; a wrong
-boundary shifts the reset by hours and never over-spends, because a stale `day` key only makes
-the gate more conservative.
+`day` is a date string on **Google's** reset boundary, which the spike of 2026-09-02 settled:
+requests-per-day quotas reset at **midnight Pacific**, and limits apply **per project, not per
+API key** ([rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)).
+
+An earlier draft of this section keyed the day by UTC and reasoned that a wrong boundary
+"never over-spends, because a stale `day` key only makes the gate more conservative". **That
+was exactly backwards.** UTC midnight is 16:00–17:00 Pacific the previous day, so a UTC key
+rolls over about eight hours early; in that window the gate resets a counter Google has not,
+and authorizes a second full day's worth of requests inside one Google day — up to 2× the cap,
+in the over-spending direction the whole reservation discipline exists to prevent. Fixed in
+`quota.quota_day()`, which uses `ZoneInfo` rather than a fixed offset because Pacific shifts an
+hour with daylight saving.
 
 ### 4.2 Per-minute pacing — `TokenBucket`
 
@@ -253,8 +261,9 @@ The chaos suite gains Tier 2 as a second async tier under the existing fault inj
 
 | Risk | Mitigation |
 |---|---|
-| **Model id is unverified.** The correct Gemini model name and free-tier RPM are not confirmed in this document. | Read from env (`GEMINI_MODEL`), exactly as `SPEECH_MODEL` is. A day-one spike confirms the id, the RPM and the reset boundary before the smoke run. Do not hardcode a guess. |
-| **Reset boundary assumed UTC.** | A wrong boundary only ever makes the gate more conservative (§4.1). Confirm in the same spike. |
+| ~~Model id is unverified~~ | **Spike 2026-09-02: namespace confirmed, choice still open.** Current stable ids are `gemini-3.7-flash`, `3.6-flash`, `3.5-flash`, `2.5-flash`, `2.5-flash-lite` and siblings; `gemini-2.0-flash` is **shut down**. Guessing would have produced a retired id. Still read from `GEMINI_MODEL`; pick a Flash-class model when a key exists. |
+| ~~Reset boundary assumed UTC~~ | **Spike 2026-09-02: CLOSED, and the assumption was wrong in the dangerous direction.** Midnight Pacific, per project. See §4.1. |
+| **The daily cap is not knowable from documentation.** Google no longer publishes free-tier RPD/RPM; they are per-project facts visible only in AI Studio, and were reportedly cut sharply in Dec 2025. | Treat `GEMINI_DAILY_QUOTA` as a LOCAL ceiling, not the vendor's. Being wrong high is now safe: `repair()` treats the vendor's own refusal as degradation, not a crash. Set `--repair-quota` from AI Studio when a key exists. |
 | Repair makes text worse | This is what I3 is for. The measured delta decides, and a negative tier2 delta correctly disables the tier — the Tier 1 result already demonstrates the harness reporting an unwelcome answer honestly. |
 | LLM output is nondeterministic, and I5 requires determinism | Determinism is required of the **plan**, not the vendor. Temperature pinned to 0 and the response cached content-addressed; replay makes tests fully deterministic. The plan is deterministic regardless of what the model returns. |
 | Prompt becomes an untracked variable | The prompt is part of `variant_key`, so changing it invalidates fixtures rather than silently altering cached results. Bumping it is a `POLICY_ID` change. |

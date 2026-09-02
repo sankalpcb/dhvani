@@ -172,3 +172,63 @@ def test_old_track_json_without_the_field_still_loads():
     legacy = ('[{"segment_id": "s0", "t_start_ms": 0, "t_end_ms": 1000, '
               '"text": "t", "risk": 0.05, "band": "ship"}]')
     assert entries_from_json(legacy)[0].repair_unavailable is False
+
+
+# --- the vendor's own refusal (spike, 2026-09-02) ---
+
+from dhvani.backends.base import FixtureMissing  # noqa: E402
+
+
+class ExplodingBackend:
+    """Stands in for Google rejecting a call our local counter allowed."""
+
+    name = "tier2"
+    variant_key = "model=fake;lang=hi-IN;prompt=test"
+
+    def __init__(self, exc, fail_on=None):
+        self.exc = exc
+        self.fail_on = fail_on
+        self.seen = []
+
+    def cost_per_call(self, segment):
+        return 0.0
+
+    def transcribe(self, segment):
+        self.seen.append(segment.segment_id)
+        if self.fail_on is None or segment.segment_id in self.fail_on:
+            raise self.exc
+        return {"text": "ok", "signals": {}}
+
+
+def test_a_vendor_refusal_defers_instead_of_crashing_the_run():
+    """Our local cap is a guess -- the account's real RPD is not published.
+    If we allow a call Google refuses, that must degrade, not abort."""
+    store, entries, segments, _, gate, _, table = _fixture(n=3)
+    backend = ExplodingBackend(RuntimeError("429 RESOURCE_EXHAUSTED"))
+    with store:
+        out = repair("src", entries, segments, backend, store, table, gate)
+
+        assert out.repaired == []
+        assert sorted(out.deferred) == ["s0", "s1", "s2"]
+        assert out.reason == "backend_error"
+
+
+def test_one_failing_segment_does_not_abandon_the_others():
+    store, entries, segments, _, gate, _, table = _fixture(n=3)
+    backend = ExplodingBackend(RuntimeError("boom"), fail_on={"s1"})
+    with store:
+        out = repair("src", entries, segments, backend, store, table, gate)
+
+        assert sorted(out.repaired) == ["s0", "s2"]
+        assert out.deferred == ["s1"]
+
+
+def test_a_missing_fixture_is_still_a_hard_error():
+    """Replay must never silently become a degraded run. 'Replay never
+    falls back to live' is load-bearing, and a swallowed FixtureMissing
+    would turn an offline mistake into a quiet no-op."""
+    store, entries, segments, _, gate, _, table = _fixture(n=2)
+    backend = ExplodingBackend(FixtureMissing("no fixture for seg"))
+    with store:
+        with pytest.raises(FixtureMissing):
+            repair("src", entries, segments, backend, store, table, gate)

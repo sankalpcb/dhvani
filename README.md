@@ -61,9 +61,18 @@ audio.
 ```
 audio ─► segment ─► Tier 0 (local, free) ─► risk score ─► router ─┬─► ship / marked / review
                      IndicConformer 600M                          │
-                                                                  └─► Tier 1 (Chirp, paid)
-                                                                       async, reconciled later
+                                                                  ├─► Tier 1 (Chirp, paid)
+                                                                  │    async, reconciled later
+                                                                  │
+                                                                  └─► Tier 2 (Gemini, free tier)
+                                                                       repairs the best available
+                                                                       hypothesis — Tier 1's if it
+                                                                       ran, Tier 0's if it did not
 ```
+
+The two upper tiers are gated the same way and are independent: Tier 2 does **not** sit
+behind Tier 1. Wiring it there, as the original spec drew it, would make it unreachable —
+nothing escalates to Tier 1 under the measured table, so nothing would ever arrive.
 
 **Risk** is a weighted sum of decoder-level signals, not a confidence number the model hands
 over:
@@ -80,8 +89,10 @@ Segments band into **ship** (< 0.30), **marked** (< 0.65) and **review**. Nothin
 silently above the flag threshold.
 
 **Routing** is a budget-constrained selection over measured deltas — a segment is escalated
-only when `delta_table.json` records that Tier 1 improved that risk bucket, and only while
-budget remains.
+only when `delta_table.json` records that *that tier* improved *that* risk bucket, and only
+while budget remains. The rule is per tier, so a tier with no measured entry is simply never
+selected. Both upper tiers are subject to it, including the free one — the question the
+table answers is "does this help?", not "can we afford it?".
 
 **Escalation is asynchronous.** Tier 1 results can arrive up to 24 hours later, out of order,
 partially, or twice. `reconcile()` folds them into a new immutable track version through a
@@ -90,6 +101,13 @@ reordering, duplication, transient errors):
 
 - **I1** no loss · **I2** idempotent merge · **I3** no negative-value escalation
 - **I4** budget respected · **I5** determinism · **I6** convergence
+
+**Quota** is guarded the same way money is, because it is the same problem in another
+currency. `Store.reserve_quota()` claims a request against the daily free-tier cap in one
+atomic statement before the call. The per-minute rate is handled separately by an in-process
+token bucket: over-running the daily cap is unrecoverable until midnight, while going too fast
+merely returns a retryable 429 — different failure semantics, different mechanisms. Pacing is
+checked first, so being rate-limited never burns quota on a call that was not made.
 
 **Money** is guarded by a single atomic statement. `Store.reserve_spend()` checks the ceiling
 and records the spend in one SQL statement, always *before* the paid call — never after, so a
@@ -187,9 +205,13 @@ as a noisy average.
 | Billing increment, 1 second | **published pricing** — the 15s increment is Speech-to-Text *On-Prem*, a different product |
 | Risk weights | **from the spec**, not refit — the spike confirmed the heads are exposed and the weights stand |
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
+| Gemini repair delta | **never measured** — the tier is built and gated, but no `tier2` entry exists, so `--repair` changes nothing on real data |
+| Gemini model id, RPM, quota reset | **unverified** — read from the environment rather than guessed; awaiting a day-one spike |
 
-The last row is the honest limit of the current table: the router has no evidence about
-high-risk segments, because none occurred.
+The last three rows are the honest limits. The router has no evidence about high-risk
+segments because none occurred, and none about Tier 2 at all — the machinery is complete and
+the measurement is not, which is the same order this project ran for Tier 1. Measuring Tier 2
+is free, so what is missing is an API key rather than a budget.
 
 ## At production scale
 

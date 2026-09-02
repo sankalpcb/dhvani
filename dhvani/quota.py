@@ -78,6 +78,42 @@ QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 # not publish free-tier RPM. The bucket smooths bursts; the daily cap is
 # what actually fails closed.
 GEMINI_RPM_DEFAULT = 15
+"""MEASURED 2026-09-02, not assumed. A live run returned:
+
+    Quota exceeded for metric:
+    generativelanguage.googleapis.com/generate_content_free_tier_requests,
+    limit: 15, model: gemini-3.5-flash-lite
+
+so the free tier allows 15 requests per MINUTE per project per model. This
+was previously flagged unpublished and guessed at; the guess happened to be
+right, and is now a measurement.
+"""
+
+PACING_SAFETY = 0.8
+"""Issue at 80% of the vendor's stated rate.
+
+Landing exactly on a documented limit is how you discover the vendor counts
+its window differently than you do -- a rolling minute against a fixed one,
+or a clock that is not yours. 20% is cheap insurance on a free tier where
+the only cost of going slower is waiting.
+"""
+
+
+def paced_bucket(rpm: int = GEMINI_RPM_DEFAULT, safety: float = PACING_SAFETY,
+                 now=None) -> "TokenBucket":
+    """A bucket that paces against a FIXED-WINDOW vendor quota.
+
+    Capacity 1 -- no burst -- which is the whole point, and was learned by
+    getting it wrong. TokenBucket(capacity=rpm, refill=rpm/60) starts FULL,
+    so it fires `rpm` requests in seconds; a per-minute quota is then spent
+    before the first minute has elapsed and everything after 429s. A live
+    calibration pass died at segment 30 of 100 exactly this way.
+
+    A token bucket's capacity IS its burst allowance. Against a limit
+    expressed per fixed window, the only safe burst is one.
+    """
+    kwargs = {"now": now} if now is not None else {}
+    return TokenBucket(capacity=1, refill_per_sec=(rpm * safety) / 60.0, **kwargs)
 
 
 def quota_day(now=None) -> str:
@@ -135,3 +171,14 @@ class QuotaGate:
     def remaining(self) -> int:
         """Requests left in today's budget. Never negative."""
         return max(0, self.cap - self.store.quota_used(self.tier, self._today()))
+
+
+def unpaced_bucket() -> "TokenBucket":
+    """A bucket that never refuses, for modes that call no vendor.
+
+    Replay reads fixtures; there is no rate to limit and no quota to
+    protect. Expressed as a bucket rather than as a None special-case so
+    QuotaGate keeps exactly one code path and the daily reservation still
+    happens -- a replay run should still be counted, just never delayed.
+    """
+    return TokenBucket(capacity=1_000_000, refill_per_sec=1_000_000.0)

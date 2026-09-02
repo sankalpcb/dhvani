@@ -323,7 +323,7 @@ def _run_repair(args) -> int:
 
     from dhvani.backends.base import Recorded
     from dhvani.backends.tier2_gemini import Tier2Gemini
-    from dhvani.quota import GEMINI_RPM_DEFAULT, QuotaGate, TokenBucket
+    from dhvani.quota import QuotaGate, paced_bucket, unpaced_bucket
 
     hypotheses: dict = {}
     with Store(args.db) as store:
@@ -331,9 +331,19 @@ def _run_repair(args) -> int:
             Tier2Gemini(hypothesis_source=hypotheses.get, lang=args.lang),
             args.mode, args.fixtures, store,
         )
+        # paced_bucket, not a hand-built one: capacity must be 1 against a
+        # fixed-window vendor quota. See its docstring -- a bucket seeded
+        # with `rpm` tokens spends the whole minute's allowance instantly.
+        #
+        # ...but only when something is actually being called. Replay reads
+        # fixtures and touches no vendor, so pacing it limits a rate that
+        # applies to nobody: a 20-segment offline run sat for 100 seconds
+        # against a limit no request was subject to. Same principle that has
+        # Recorded.cost_per_call() return 0.0 in replay -- a mode that calls
+        # nothing must not pay live-mode costs.
         gate = QuotaGate(store=store, tier=tier2.name, cap=args.quota,
-                         bucket=TokenBucket(capacity=max(1, GEMINI_RPM_DEFAULT),
-                                            refill_per_sec=GEMINI_RPM_DEFAULT / 60.0))
+                         bucket=unpaced_bucket() if args.mode == "replay"
+                                else paced_bucket())
         # NOT LazySegments. Tier 2 is text-in, text-out: Tier2Gemini reads
         # segment.segment_id and nothing else, so loading phase 1's cached
         # PCM would demand audio this tier never looks at -- and would make

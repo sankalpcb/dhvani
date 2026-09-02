@@ -278,3 +278,103 @@ def test_quota_exhaustion_still_stops_immediately():
 
     assert len(rows) == 2
     assert waits == [], "slept waiting for a daily quota that refills tomorrow"
+
+
+# --- vendor 429 handling (measured failure, 2026-09-02) ---
+
+class FlakyTier2(FakeTier2):
+    """Fails the first `fails` calls per segment with a vendor-style error."""
+
+    def __init__(self, fails=1):
+        super().__init__()
+        self.fails = fails
+        self.attempts = 0
+
+    def transcribe(self, segment):
+        self.attempts += 1
+        if self.attempts <= self.fails:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+        return super().transcribe(segment)
+
+
+def test_a_transient_vendor_error_is_retried_not_fatal():
+    """A live run died at segment 30 of 100 on a 429 that propagated out of
+    transcribe(). The pipeline path (dhvani/repair.py) already degraded on
+    backend errors; the CALIBRATION path did not, so the same lesson had to
+    be learned twice. Google even returns a retryDelay -- the run should use
+    it rather than abandoning 70 segments."""
+    store, selected, gate = _fixture(n=2)
+    backend = FlakyTier2(fails=1)
+    with store:
+        rows = _run(store, selected, gate, backend, sleep=lambda s: None)
+
+        assert len(rows) == 2, "a retryable 429 lost segments"
+
+
+def test_a_permanently_failing_backend_defers_rather_than_crashing():
+    store, selected, gate = _fixture(n=3)
+    backend = FlakyTier2(fails=99)
+    with store:
+        rows = _run(store, selected, gate, backend, sleep=lambda s: None)
+
+    assert rows == [], "should measure nothing, but must not raise"
+
+
+def test_a_missing_fixture_still_aborts_the_calibration():
+    """Replay must never silently become a degraded measurement."""
+    from dhvani.backends.base import FixtureMissing
+
+    class NoFixture(FakeTier2):
+        def transcribe(self, segment):
+            raise FixtureMissing("no fixture")
+
+    store, selected, gate = _fixture(n=2)
+    with store:
+        with pytest.raises(FixtureMissing):
+            _run(store, selected, gate, NoFixture(), sleep=lambda s: None)
+
+
+def test_replay_mode_is_not_paced(tmp_path, monkeypatch):
+    """Replay makes NO vendor call, so pacing it is meaningless -- and
+    expensive: at 12 requests/minute a 20-segment offline run sat for 100
+    seconds waiting for a rate limit that applies to nobody. Same reasoning
+    that makes Recorded.cost_per_call() return 0.0 in replay: a mode that
+    calls nothing must not pay live-mode costs.
+    """
+    import json as _json
+    import time as _time
+
+    from dhvani.backends.tier2_gemini import Tier2Gemini
+    from dhvani.cli_calibrate import main as calib_main
+    from dhvani.ids import variant_slug
+    from dhvani.store import Store as _Store
+
+    db = tmp_path / "c.db"
+    scored = []
+    with _Store(str(db)) as s:
+        for i in range(MIN_BUCKET_SAMPLES):
+            sid = f"{i:064d}"
+            s.put_reference(sid, "एक दो तीन", "hi-IN", f"spk{i}", f"D{i}")
+            s.put_hypothesis(sid, "tier0", "1 2 3", {}, 0.0, "t0v")
+            scored.append({"segment_id": sid, "risk": 0.05, "lang": "hi-IN",
+                           "duration_ms": 2000, "tier0_variant": "t0v"})
+    sfile = tmp_path / "scored.json"
+    sfile.write_text(_json.dumps(scored))
+
+    fixtures = tmp_path / "fx"
+    backend = Tier2Gemini(hypothesis_source=lambda s: "", lang="hi-IN", model="")
+    fdir = fixtures / "tier2" / variant_slug(backend.variant_key)
+    fdir.mkdir(parents=True)
+    for row in scored:
+        (fdir / f"{row['segment_id']}.json").write_text(
+            _json.dumps({"text": "एक दो तीन", "signals": {}}))
+
+    monkeypatch.chdir(tmp_path)
+    started = _time.monotonic()
+    code = calib_main(["repair", "--db", str(db), "--scored-in", str(sfile),
+                       "--out", str(tmp_path / "t2.json"),
+                       "--mode", "replay", "--fixtures", str(fixtures)])
+    elapsed = _time.monotonic() - started
+
+    assert code == 0
+    assert elapsed < 10, f"replay was rate-limited: {elapsed:.0f}s for {len(scored)} segments"

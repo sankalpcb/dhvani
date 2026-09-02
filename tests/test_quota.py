@@ -145,3 +145,42 @@ def test_the_boundary_tracks_daylight_saving():
     would drift by an hour for half the year."""
     assert quota_day(_at("2026-01-15T07:30:00+00:00")) == "2026-01-14"  # PST
     assert quota_day(_at("2026-07-15T07:30:00+00:00")) == "2026-07-15"  # PDT
+
+
+# --- pacing against a FIXED-WINDOW vendor quota (measured 2026-09-02) ---
+
+from dhvani.quota import paced_bucket  # noqa: E402
+
+
+def test_a_paced_bucket_does_not_burst():
+    """The bug this exists to prevent, measured live.
+
+    TokenBucket(capacity=15, refill=15/60) starts FULL, so it fires 15
+    requests in seconds. Google's free tier is 15 requests per MINUTE
+    (measured: quotaValue 15 for gemini-3.5-flash-lite), so that burst
+    consumes the entire window instantly and the 16th call 429s. A bucket's
+    capacity IS its burst allowance, and burst is exactly what a
+    fixed-window quota punishes.
+    """
+    clock = FakeClock()
+    b = paced_bucket(rpm=15, now=clock)
+
+    assert b.take() is True          # the one free token
+    assert b.take() is False, "burst allowed against a fixed-window quota"
+
+
+def test_a_paced_bucket_stays_under_the_vendor_rate():
+    """Over a full minute it must issue FEWER than the vendor's limit, not
+    exactly it -- landing on the boundary is how you discover the vendor
+    counts a window differently than you do."""
+    clock = FakeClock()
+    b = paced_bucket(rpm=15, now=clock)
+
+    issued = 0
+    for _ in range(600):             # 60s at 0.1s granularity
+        if b.take():
+            issued += 1
+        clock.advance(0.1)
+
+    assert issued < 15, f"issued {issued} in a minute against a limit of 15"
+    assert issued >= 10, f"far too conservative: {issued}/minute"

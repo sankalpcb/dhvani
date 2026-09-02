@@ -20,6 +20,7 @@ dev = ["pytest>=8.0"]
 models = ["torch>=2.2", "transformers>=4.40", "onnxruntime>=1.17"]
 cloud = ["google-cloud-speech>=2.26"]
 data = ["datasets>=2.19", "soundfile>=0.12"]
+repair = ["google-genai>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

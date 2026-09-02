@@ -18,6 +18,11 @@ class TrackEntry:
     text: str
     risk: float
     band: str
+    # Design §5.2: repair was wanted but the free-tier quota was spent.
+    # Deliberately NOT a band -- the band reports risk, and "we did not get
+    # to improve this" is a different fact from "this is risky". Defaulted
+    # so tracks written before Tier 2 existed still deserialize.
+    repair_unavailable: bool = False
 
 
 def band_of(risk: float) -> str:

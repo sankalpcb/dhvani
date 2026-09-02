@@ -657,3 +657,63 @@ def test_the_histogram_reports_speaker_and_district_concentration(capsys):
     assert "speakers" in err
     assert "districts" in err
     assert "D2" in err, "the dominant district should be named"
+
+
+# --- phase 3: dhvani-calibrate repair (M5, design G6) ---
+
+def test_repair_subcommand_exists(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "repair" in capsys.readouterr().out
+
+
+def test_repair_help_exits_zero(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["repair", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--quota" in out
+    assert "--dry-run" in out
+
+
+def test_repair_dry_run_writes_no_table(tmp_path):
+    scored = tmp_path / "scored.json"
+    scored.write_text(json.dumps([
+        {"segment_id": f"s{i:04d}" + "0" * 58, "risk": 0.05,
+         "lang": "hi-IN", "duration_ms": 2000, "tier0_variant": "t0"}
+        for i in range(MIN_BUCKET_SAMPLES)]))
+    out = tmp_path / "table.json"
+
+    code = main(["repair", "--db", str(tmp_path / "c.db"),
+                 "--scored-in", str(scored), "--out", str(out), "--dry-run"])
+
+    assert code == 0
+    assert not out.exists(), "dry run wrote a table"
+
+
+def test_repair_needs_no_confirm_because_it_spends_no_money(tmp_path, capsys):
+    """Tier 1 refuses without --confirm because it bills. Tier 2 is free, so
+    demanding the same ceremony would be cargo-culting the guard rather than
+    applying it -- but the QUOTA must still be stated up front."""
+    scored = tmp_path / "scored.json"
+    scored.write_text(json.dumps([
+        {"segment_id": f"s{i:04d}" + "0" * 58, "risk": 0.05,
+         "lang": "hi-IN", "duration_ms": 2000, "tier0_variant": "t0"}
+        for i in range(MIN_BUCKET_SAMPLES)]))
+
+    code = main(["repair", "--db", str(tmp_path / "c.db"),
+                 "--scored-in", str(scored), "--out", str(tmp_path / "t.json"),
+                 "--dry-run"])
+
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "quota" in err.lower(), "the run must state its quota budget"
+
+
+def test_repair_reports_a_missing_scored_file(tmp_path, capsys):
+    code = main(["repair", "--db", str(tmp_path / "c.db"),
+                 "--scored-in", str(tmp_path / "nope.json"),
+                 "--out", str(tmp_path / "t.json")])
+    assert code == 1
+    assert "collect" in capsys.readouterr().err

@@ -1997,7 +1997,7 @@ from dhvani.evaluator import to_wer
 from dhvani.router import bucket_of
 
 
-def build(rows: list[dict]) -> dict:
+def build(rows: list[dict], tier: str = "tier1") -> dict:
     """rows: {risk, reference, tier0_text, tier1_text} -> {tier: {bucket: delta}}
 
     Delta is in toWER *points* (percentage points), so a 0.25 -> 0.0 toWER

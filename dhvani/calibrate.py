@@ -20,6 +20,7 @@ import numpy as np
 from dhvani.backends.tier1_chirp import cost_for_duration_ms
 from dhvani.config import POLICY_ID, RISK_WEIGHTS
 from dhvani.delta_table import build as build_delta_table
+from dhvani.quota import QuotaExhausted, RateLimited
 from dhvani.router import bucket_of
 from dhvani.scorer import extract, risk as compute_risk
 from dhvani.segmenter import Segment
@@ -487,7 +488,8 @@ def escalate_selected(selected, tier1, store, segments_by_id,
     return rows
 
 
-def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
+def write_table(rows, selected, path: str, spend_usd: float, langs,
+                tier: str = "tier1") -> dict:
     """Build the delta table and write it with provenance.
 
     build()'s contract is untouched; meta is additive. Nothing enforces meta
@@ -510,22 +512,22 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
             f"from 'Tier 1 never helps'."
         )
 
-    table = build_delta_table(rows)
+    table = build_delta_table(rows, tier=tier)
 
     bucket_n: dict[str, int] = defaultdict(int)
     for row in rows:
         bucket_n[bucket_of(row["risk"])] += 1
 
-    dropped = sorted(b for b in table["tier1"] if bucket_n[b] < MIN_BUCKET_SAMPLES)
+    dropped = sorted(b for b in table[tier] if bucket_n[b] < MIN_BUCKET_SAMPLES)
     if dropped:
-        table = {"tier1": {b: v for b, v in table["tier1"].items()
-                           if b not in set(dropped)}}
+        table = {tier: {b: v for b, v in table[tier].items()
+                        if b not in set(dropped)}}
         print(f"dropped {len(dropped)} bucket(s) below the "
               f"{MIN_BUCKET_SAMPLES}-sample floor after skipping: "
               + ", ".join(f"{b} (n={bucket_n[b]})" for b in dropped),
               file=sys.stderr)
 
-    if not table["tier1"]:
+    if not table[tier]:
         raise NoMeasuredBuckets(
             f"no risk bucket reached the {MIN_BUCKET_SAMPLES}-sample floor "
             f"from {len(rows)} row(s): "
@@ -535,6 +537,10 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
 
     payload = dict(table)
     payload["meta"] = {
+        # Which tier this table measures. Recorded because a table with a
+        # "tier2" key and no note of how it was produced is one rename away
+        # from being read as a Tier 1 measurement.
+        "tier": tier,
         "policy_id": POLICY_ID,
         "risk_weights": dict(RISK_WEIGHTS),
         # bucket_n keeps the PRE-drop counts on purpose: it is the evidence
@@ -556,3 +562,114 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
     return table
+
+
+def _default_sleep(seconds):
+    import time
+    time.sleep(seconds)
+
+
+PACING_WAIT_SEC = 2.0
+"""How long to wait for the token bucket to refill before retrying a call.
+
+Not a backoff: the bucket refills at a known rate, so this is simply the
+interval at which a batch re-offers work it was told was too early.
+"""
+
+MAX_PACING_WAITS = 60
+"""Bound on consecutive waits for ONE segment.
+
+Without it a misconfigured bucket -- capacity smaller than one call, say --
+would spin forever rather than failing. Sixty waits at PACING_WAIT_SEC is
+two minutes on a single segment, which is far longer than any real refill
+and short enough that a stuck run is noticed.
+"""
+
+
+def repair_selected(selected, tier2, store, gate, hypotheses: dict,
+                    segments_by_id, tier1_variant: str = "",
+                    tier0_variant: str = "", sleep=None) -> list[dict]:
+    """Phase 3: run Tier 2 over the sample and assemble rows for build().
+
+    The Tier 1 analogue is escalate_selected(); two differences matter.
+
+    THE SCARCE RESOURCE IS QUOTA, NOT MONEY. There is no ceiling to breach
+    and no ledger to overstate -- there is a daily allowance that refills.
+    So exhaustion STOPS the pass and returns the rows already earned rather
+    than raising: a partial measurement is worth keeping, and the next run
+    resumes for free because every repair is cached by (segment_id, tier,
+    variant_key). Tier 1's path raises on BudgetExceeded because spending
+    past a ceiling is a different kind of wrong from running out of a
+    daily allowance.
+
+    THE BASELINE IS WHAT TIER 2 ACTUALLY REPAIRED. `before_text` is Tier 1's
+    hypothesis when one exists at `tier1_variant`, and Tier 0's otherwise --
+    because that is the text handed to the model. Scoring against Tier 0
+    when Tier 1 already ran would credit Tier 2 with Tier 1's gain on top of
+    its own. `tier0_text` is recorded regardless so a reader can see the
+    whole chain rather than just the last hop.
+
+    `hypotheses` is the dict the backend's hypothesis_source reads. It is
+    filled here, immediately before each call, because only this function
+    knows which upstream text a given segment should be repaired from.
+    """
+    rows: list[dict] = []
+
+    for item in selected:
+        segment_id = item["segment_id"]
+        reference = store.get_reference(segment_id)
+        tier0 = store.get_hypothesis(segment_id, "tier0",
+                                     item.get("tier0_variant", tier0_variant))
+        if reference is None or tier0 is None:
+            # No ground truth or no Tier 0 output means no meaningful delta.
+            continue
+
+        before_text = tier0["text"]
+        if tier1_variant:
+            tier1 = store.get_hypothesis(segment_id, "tier1", tier1_variant)
+            if tier1 is not None:
+                before_text = tier1["text"]
+
+        cached = store.get_hypothesis(segment_id, tier2.name, tier2.variant_key)
+        if cached is None:
+            # The two limits are handled differently HERE too, and the
+            # distinction is the whole reason they are separate exceptions.
+            #
+            # RateLimited is soft: nothing was consumed, the call merely came
+            # too soon, and the bucket refills in seconds. Breaking the batch
+            # on it silently measures fewer segments than were selected --
+            # which is how a bucket slips under MIN_BUCKET_SAMPLES and a run
+            # reports having measured nothing. So it waits and re-offers.
+            #
+            # QuotaExhausted is hard: the daily allowance does not refill
+            # until tomorrow, so waiting is pointless and stopping is right.
+            granted = False
+            for _ in range(MAX_PACING_WAITS + 1):
+                try:
+                    gate.acquire()
+                    granted = True
+                    break
+                except RateLimited:
+                    (sleep or _default_sleep)(PACING_WAIT_SEC)
+                except QuotaExhausted:
+                    break
+            if not granted:
+                break
+            hypotheses[segment_id] = before_text
+            result = tier2.transcribe(segments_by_id[segment_id])
+            store.put_hypothesis(segment_id, tier2.name, result["text"],
+                                 result.get("signals", {}), 0.0,
+                                 tier2.variant_key)
+            tier2_text = result["text"]
+        else:
+            tier2_text = cached["text"]
+
+        rows.append({
+            "risk": item["risk"],
+            "reference": reference["reference"],
+            "tier0_text": tier0["text"],
+            "before_text": before_text,
+            "tier2_text": tier2_text,
+        })
+
+    return rows

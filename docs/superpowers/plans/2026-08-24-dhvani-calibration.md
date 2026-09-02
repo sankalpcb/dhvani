@@ -117,7 +117,7 @@ RISK_WEIGHTS: dict
   - `Store.put_reference(segment_id, reference, lang, speaker_id=None, district=None) -> bool`
   - `Store.get_reference(segment_id) -> dict | None` — keys `reference, lang, speaker_id, district`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_store_references.py
@@ -163,12 +163,12 @@ def test_references_do_not_disturb_hypotheses(store):
     assert store.get_reference("c" * 64)["reference"] == "ref"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_store_references.py -v`
 Expected: FAIL with `AttributeError: 'Store' object has no attribute 'put_reference'`
 
-- [ ] **Step 3: Extend the schema**
+- [x] **Step 3: Extend the schema**
 
 Append to `SCHEMA` in `dhvani/store.py`. Note the trailing underscore — `references` is a SQL reserved word.
 
@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS references_ (
 );
 ```
 
-- [ ] **Step 4: Add the methods inside the `Store` class**
+- [x] **Step 4: Add the methods inside the `Store` class**
 
 ```python
     def put_reference(self, segment_id, reference, lang,
@@ -213,12 +213,12 @@ CREATE TABLE IF NOT EXISTS references_ (
                 "speaker_id": row["speaker_id"], "district": row["district"]}
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_store_references.py -v`
 Expected: PASS, 5 tests
 
-- [ ] **Step 6: Full suite and commit**
+- [x] **Step 6: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -247,7 +247,7 @@ git commit -m "feat: references_ table for calibration ground truth"
     as an empty corpus
   - `disjoint_by(items, key: str) -> bool` — True when no value of `key` repeats
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_corpus.py
@@ -318,12 +318,12 @@ def test_disjoint_by_ignores_none_values():
     assert disjoint_by(items, "speaker_id") is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_corpus.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.corpus'`
 
-- [ ] **Step 3: Add the `data` extra**
+- [x] **Step 3: Add the `data` extra**
 
 In `pyproject.toml`, alongside the existing `models` and `cloud` extras:
 
@@ -331,7 +331,7 @@ In `pyproject.toml`, alongside the existing `models` and `cloud` extras:
 data = ["datasets>=2.19", "soundfile>=0.12"]
 ```
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 ```python
 # dhvani/corpus.py
@@ -448,16 +448,16 @@ class IndicVoicesCorpus:
             count += 1
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_corpus.py -v`
 Expected: PASS, 8 tests
 
-- [ ] **Step 6: Confirm G5 holds**
+- [x] **Step 6: Confirm G5 holds**
 
 Run: `uv run python -c "import datasets"` — expect `ModuleNotFoundError`. Then `uv run pytest -q` and confirm everything still passes. Importing `dhvani.corpus` must not require `datasets`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dhvani/corpus.py pyproject.toml tests/test_corpus.py
@@ -481,7 +481,7 @@ git commit -m "feat: calibration corpus sources with lazy datasets import"
     where each `scored` item has at least `segment_id` and `risk`
   - `histogram(scored: list[dict]) -> dict[str, int]` — bucket label -> count
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_stratify.py
@@ -539,12 +539,12 @@ def test_stratify_of_empty_is_empty():
     assert stratify([]) == []
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_stratify.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.calibrate'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/calibrate.py
@@ -600,12 +600,12 @@ def stratify(scored: list[dict], n_per_bucket: int = N_PER_BUCKET) -> list[dict]
     return chosen
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_stratify.py -v`
 Expected: PASS, 9 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -627,7 +627,7 @@ git commit -m "feat: deterministic stratified sampling across risk buckets"
   - `collect(corpus, tier0, store, langs: list[str], per_lang: int) -> list[dict]`
     returns scored items: `{segment_id, risk, lang, duration_ms}`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_collect.py
@@ -712,12 +712,12 @@ def test_collect_carries_duration_for_later_pricing(store, pcm_dir):
     assert out[0]["duration_ms"] == 2000
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_collect.py -v`
 Expected: FAIL with `ImportError: cannot import name 'collect'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `dhvani/calibrate.py`:
 
@@ -763,12 +763,12 @@ def collect(corpus, tier0, store, langs, per_lang: int) -> list[dict]:
     return scored
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_collect.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -791,7 +791,7 @@ git commit -m "feat: phase 1 collect — resumable local transcription and scori
   - `escalate_selected(selected, tier1, store, segments_by_id: dict, tier0_variant: str = "") -> list[dict]` — returns rows
   - `write_table(rows, selected, path, spend_usd, langs) -> dict`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_escalate_phase.py
@@ -922,12 +922,12 @@ def test_write_table_records_per_bucket_counts(tmp_path):
     assert json.loads(path.read_text())["meta"]["bucket_n"]["0.6-0.7"] == 22
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_escalate_phase.py -v`
 Expected: FAIL with `ImportError: cannot import name 'estimate_cost'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `dhvani/calibrate.py`:
 
@@ -1017,12 +1017,12 @@ def write_table(rows, selected, path: str, spend_usd: float, langs) -> dict:
     return table
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_escalate_phase.py -v`
 Expected: PASS, 11 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -1043,7 +1043,7 @@ git commit -m "feat: phase 2 escalation, row assembly, and provenance-carrying t
 - Consumes: everything above
 - Produces: `main(argv=None) -> int` with `collect` and `escalate` subcommands
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_cli_calibrate.py
@@ -1119,12 +1119,12 @@ def test_pyproject_declares_the_calibrate_script():
     assert data["project"]["scripts"]["dhvani-calibrate"] == "dhvani.cli_calibrate:main"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_cli_calibrate.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.cli_calibrate'`
 
-- [ ] **Step 3: Add the script entry**
+- [x] **Step 3: Add the script entry**
 
 In `pyproject.toml` under `[project.scripts]`:
 
@@ -1132,7 +1132,7 @@ In `pyproject.toml` under `[project.scripts]`:
 dhvani-calibrate = "dhvani.cli_calibrate:main"
 ```
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 ```python
 # dhvani/cli_calibrate.py
@@ -1247,12 +1247,12 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_cli_calibrate.py -v`
 Expected: PASS, 7 tests
 
-- [ ] **Step 6: Confirm G5 and commit**
+- [x] **Step 6: Confirm G5 and commit**
 
 Run `uv run python -c "import torch"`, `import datasets`, `import google.cloud` — all three must raise `ModuleNotFoundError`. Then `uv run pytest -q` must still pass, and `uv run dhvani-calibrate --help` must exit 0.
 
@@ -1265,16 +1265,23 @@ git commit -m "feat: dhvani-calibrate CLI with dry-run and spend confirmation"
 
 ## Exit Criteria
 
-- [ ] `uv run pytest` passes with no ML deps, no cloud SDK, no `datasets`, no credentials, no network
-- [ ] `uv run dhvani-calibrate --help` exits 0 and lists both subcommands
-- [ ] `escalate` without `--confirm` refuses and exits non-zero
-- [ ] `--dry-run` prints the histogram and estimate and writes nothing
-- [ ] Re-running `collect` over the same corpus makes zero Tier 0 calls
-- [ ] Re-running `escalate` over the same sample reserves zero additional spend
-- [ ] A thin bucket (n < 20) is absent from the produced table
+- [x] `uv run pytest` passes with no ML deps, no cloud SDK, no `datasets`, no credentials, no network
+- [x] `uv run dhvani-calibrate --help` exits 0 and lists both subcommands
+- [x] `escalate` without `--confirm` refuses and exits non-zero
+- [x] `--dry-run` prints the histogram and estimate and writes nothing
+- [x] Re-running `collect` over the same corpus makes zero Tier 0 calls
+- [x] Re-running `escalate` over the same sample reserves zero additional spend
+- [x] A thin bucket (n < 20) is absent from the produced table
 
 ## Deferred
 
 Running the harness for real — reinstalling the `models` and `data` extras, streaming
 IndicVoices, and spending the ~$0.75 — is an operational step after this plan lands, not part
 of it. Goal G5 is verified before and after that run, not during.
+
+**Status 2026-09-02: run, and cheaper than estimated.** Executed 2026-08-25 — 150 IndicVoices
+utterances, 124 escalated to Chirp 2, **$0.1013**, against the ~$0.75 estimated here. The
+result was that both measured deltas are negative, so the shipped table escalates nothing;
+that is the finding, not a failed run. G5 was re-verified on 2026-09-02 with the extras
+uninstalled. Note the calibration DB and PCM cache from that run are gone (both gitignored),
+so the table can no longer be re-derived for $0 — a repeat means re-running both phases.

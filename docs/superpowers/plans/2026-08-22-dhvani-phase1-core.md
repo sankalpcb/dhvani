@@ -68,7 +68,7 @@
   - `dhvani.audio.normalize(samples: np.ndarray, src_rate: int) -> np.ndarray` (mono int16 @ 16kHz)
   - `dhvani.ids.segment_id(pcm: np.ndarray) -> str` (64-char hex)
 
-- [ ] **Step 1: Create the project skeleton**
+- [x] **Step 1: Create the project skeleton**
 
 ```bash
 mkdir -p dhvani tests fixtures
@@ -100,7 +100,7 @@ touch dhvani/__init__.py
 uv venv && uv pip install -e ".[dev]"
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 ```python
 # tests/test_ids.py
@@ -154,12 +154,12 @@ def test_rejects_wrong_dtype():
         segment_id(np.zeros(10, dtype=np.float32))
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_ids.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.audio'`
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 ```python
 # dhvani/config.py
@@ -234,12 +234,12 @@ def segment_id(pcm: np.ndarray) -> str:
     return hashlib.sha256(pcm.tobytes()).hexdigest()
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_ids.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add pyproject.toml dhvani/ tests/test_ids.py
@@ -266,7 +266,7 @@ git commit -m "feat: audio normalization and content-addressed segment IDs"
   - `Store.check_budget(cost_usd) -> None` (raises `BudgetExceeded`)
   - `dhvani.store.BudgetExceeded` (Exception)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_store.py
@@ -318,12 +318,12 @@ def test_check_budget_fails_closed_at_ceiling(store):
         store.check_budget(0.5)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_store.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.store'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/store.py
@@ -444,12 +444,12 @@ class Store:
             )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_store.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/store.py tests/test_store.py
@@ -475,7 +475,7 @@ git commit -m "feat: SQLite store with schema-enforced idempotency and spend cei
 Energy-based VAD is used rather than Silero to keep the test suite dependency-free and
 deterministic. Swapping in Silero later is a one-function change behind this interface.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_segmenter.py
@@ -534,12 +534,12 @@ def test_segment_ids_are_populated_and_unique():
     assert len(set(ids)) == len(ids)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_segmenter.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.segmenter'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/segmenter.py
@@ -625,12 +625,12 @@ def segment(pcm: np.ndarray, max_ms: int = 8000) -> list[Segment]:
     return out
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_segmenter.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/segmenter.py tests/test_segmenter.py
@@ -653,7 +653,7 @@ git commit -m "feat: energy-based VAD segmenter with content-addressed segments"
   - `dhvani.signals.romanization_smell(text: str) -> float` in `[0.0, 1.0]`
   - `dhvani.signals.code_mixing_index(text: str) -> float` in `[0.0, 100.0]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_signals.py
@@ -707,12 +707,12 @@ def test_code_mixing_index_rises_with_mixing():
     assert 0.0 < low < high <= 100.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_signals.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.signals'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/signals.py
@@ -792,12 +792,12 @@ def code_mixing_index(text: str) -> float:
     return 100.0 * (1.0 - counts.most_common(1)[0][1] / len(langs))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_signals.py -v`
 Expected: PASS, 8 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/signals.py tests/test_signals.py
@@ -819,7 +819,7 @@ git commit -m "feat: script entropy, romanization smell, and CMI signals"
   - `dhvani.scorer.extract(text: str, decoder_signals: dict, duration_ms: int) -> Features`
   - `dhvani.scorer.risk(f: Features) -> float` in `[0.0, 1.0]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_scorer.py
@@ -871,12 +871,12 @@ def test_extract_normalizes_missing_decoder_signals_to_zero():
     assert f.mean_neg_logprob == 0.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_scorer.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.scorer'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/scorer.py
@@ -922,12 +922,12 @@ def risk(f: Features) -> float:
 
 Note: `RISK_WEIGHTS` sums to 1.0, so all-max features yield exactly 1.0.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_scorer.py -v`
 Expected: PASS, 8 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/scorer.py tests/test_scorer.py
@@ -950,7 +950,7 @@ git commit -m "feat: deterministic weighted risk scorer"
   - `dhvani.router.bucket_of(risk: float) -> str` (e.g. `"0.6-0.7"`)
   - `dhvani.router.delta_for(risk: float, tier: str, delta_table: dict) -> float`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_router.py
@@ -1013,12 +1013,12 @@ def test_delta_for_reads_table_and_defaults_to_zero():
     assert delta_for(0.65, "tier2", table) == 0.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_router.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.router'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/router.py
@@ -1075,12 +1075,12 @@ def plan(candidates: list[Candidate], budget_usd: float) -> list[Candidate]:
     return chosen
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_router.py -v`
 Expected: PASS, 8 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/router.py tests/test_router.py
@@ -1103,7 +1103,7 @@ git commit -m "feat: pure greedy-knapsack escalation router"
   - `dhvani.backends.base.Mode` — `"record" | "replay" | "live"`
   - `dhvani.backends.base.Recorded(inner: Backend, mode: Mode, fixture_dir: str, store: Store | None)` — wrapper implementing `Backend`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_backends.py
@@ -1183,12 +1183,12 @@ def test_live_mode_fails_closed_at_budget_ceiling(tmp_path):
             b.transcribe(_seg())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_backends.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.backends'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```bash
 mkdir -p dhvani/backends && touch dhvani/backends/__init__.py
@@ -1277,12 +1277,12 @@ class Recorded:
         return result
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_backends.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/backends/ tests/test_backends.py
@@ -1309,7 +1309,7 @@ eliminate the penalty for Latin-vs-Indic renderings of English loanwords, becaus
 Malayalam of "deployment" does not match English spelling. Eliminating it entirely needs a
 phonetic distance or a loanword lexicon. Out of scope for Phase 1.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_evaluator.py
@@ -1354,12 +1354,12 @@ def test_to_wer_is_bounded_below_by_zero():
     assert to_wer("", "") == 0.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_evaluator.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.evaluator'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/evaluator.py
@@ -1429,7 +1429,7 @@ def to_wer(reference: str, hypothesis: str) -> float:
     return plain_wer(to_latin(reference), to_latin(hypothesis))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_evaluator.py -v`
 Expected: PASS, 7 tests
@@ -1439,7 +1439,7 @@ true transliteration equivalents — verify with
 `python -c "from dhvani.evaluator import to_latin; print(to_latin('कम'), to_latin('कമ'))"`
 and pick a pair that genuinely matches before adjusting the implementation.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dhvani/evaluator.py tests/test_evaluator.py
@@ -1461,7 +1461,7 @@ git commit -m "feat: transliteration-optimized WER evaluator"
   - `dhvani.backends.tier0_conformer.disagreement(ctc_text: str, rnnt_text: str) -> float`
   - `transcribe(segment) -> {"text": str, "signals": {"ctc_rnnt_disagreement": float, "mean_neg_logprob": float}}`
 
-- [ ] **Step 1: Run the day-one spike (spec §14 risk)**
+- [x] **Step 1: Run the day-one spike (spec §14 risk)**
 
 Determine whether the model exposes both CTC and RNNT heads. If it does not,
 `ctc_rnnt_disagreement` is unavailable and `config.RISK_WEIGHTS` must be re-fit over the
@@ -1490,7 +1490,7 @@ for decoding in ("ctc", "rnnt"):
 
 Run: `uv run python scripts/spike_conformer.py`
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 The adapter is tested through the `Backend` contract using a stub, so the suite never needs
 model weights or a network.
@@ -1546,12 +1546,12 @@ def test_disagreement_is_bounded():
     assert disagreement("", "") == 0.0
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_tier0.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.backends.tier0_conformer'`
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 ```python
 # dhvani/backends/tier0_conformer.py
@@ -1625,12 +1625,12 @@ class Tier0Conformer:
         return torch.from_numpy((pcm.astype(np.float32) / 32768.0)).unsqueeze(0)
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_tier0.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dhvani/backends/tier0_conformer.py scripts/spike_conformer.py tests/test_tier0.py
@@ -1654,7 +1654,7 @@ Spike result: replace this line with the actual scripts/spike_conformer.py\noutp
   - `dhvani.pipeline.band_of(risk: float) -> str` — `"ship" | "marked" | "review"`
   - `dhvani.pipeline.run(pcm, source_id, tier0, store, delta_table, budget_usd) -> list[TrackEntry]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_pipeline.py
@@ -1735,12 +1735,12 @@ def test_zero_budget_still_produces_a_full_track(store):
     assert len(entries) >= 1
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_pipeline.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.pipeline'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/pipeline.py
@@ -1864,17 +1864,17 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_pipeline.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 Run: `uv run pytest -v`
 Expected: PASS, 67 tests
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dhvani/pipeline.py dhvani/cli.py tests/test_pipeline.py
@@ -1900,7 +1900,7 @@ git commit -m "feat: synchronous pipeline orchestration and CLI"
   - `dhvani.report.frontier(entries, delta_table, budgets) -> list[dict]` with keys
     `budget_usd`, `escalated`, `cost_usd`, `mean_risk`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_delta_table.py
@@ -1976,12 +1976,12 @@ def test_cost_never_exceeds_budget():
         assert row["cost_usd"] <= row["budget_usd"] + 1e-9
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_delta_table.py tests/test_report.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.delta_table'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/delta_table.py
@@ -2119,17 +2119,17 @@ bench:
 	@echo "wrote results/report.md"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_delta_table.py tests/test_report.py -v`
 Expected: PASS, 7 tests
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `uv run pytest -v`
 Expected: PASS, 74 tests
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 mkdir -p results && touch results/.gitkeep
@@ -2157,7 +2157,7 @@ the asynchronous dynamic-batch path (spec §7).
   - `dhvani.backends.tier1_chirp.USD_PER_MIN_DYNAMIC_BATCH: float = 0.004`
   - `dhvani.backends.tier1_chirp.USD_PER_MIN_STANDARD: float = 0.016`
 
-- [ ] **Step 1: Run the day-one spike (spec §14 risk)**
+- [x] **Step 1: Run the day-one spike (spec §14 risk)**
 
 Confirm Chirp 3 supports the dynamic-batch processing strategy. If it does not, set
 `USD_PER_MIN_DYNAMIC_BATCH = USD_PER_MIN_STANDARD` and note that the benchmark budget rises
@@ -2202,7 +2202,7 @@ except Exception as exc:
 
 Run: `uv run python scripts/spike_chirp.py`
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Tested through the `Backend` contract with a stub client, so the suite needs no credentials.
 
@@ -2264,12 +2264,12 @@ def test_transcribe_calls_the_client_once():
     assert client.calls == 1
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_tier1.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.backends.tier1_chirp'`
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 ```python
 # dhvani/backends/tier1_chirp.py
@@ -2352,17 +2352,17 @@ def _project() -> str:
     return project
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_tier1.py -v`
 Expected: PASS, 6 tests
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `uv run pytest -v`
 Expected: PASS, 80 tests
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dhvani/backends/tier1_chirp.py scripts/spike_chirp.py tests/test_tier1.py
@@ -2376,24 +2376,27 @@ i.e. whether DYNAMIC_BATCHING was accepted for chirp_3."
 
 ## Phase 1 Exit Criteria
 
-- [ ] `uv run pytest` passes with no network access and no cloud credentials
-- [ ] `dhvani sample.wav` produces a banded caption track
-- [ ] Re-running the same audio makes zero backend calls (cache hit)
-- [ ] `make bench` writes a cost/quality frontier to `results/report.md`
-- [ ] Total external spend recorded in the `spend` ledger is under USD 5
-- [ ] Both spike results are recorded in git history: CTC/RNNT head availability
+- [x] `uv run pytest` passes with no network access and no cloud credentials
+- [x] `dhvani sample.wav` produces a banded caption track
+- [x] Re-running the same audio makes zero backend calls (cache hit)
+- [x] `make bench` writes a cost/quality frontier to `results/report.md`
+- [x] Total external spend recorded in the `spend` ledger is under USD 5 — **$0.1013 at the time, well under the ceiling.** Attested by the run record (`delta_table.json` meta, README) rather than the ledger itself: the calibration DB is gitignored and no longer exists, so this is no longer re-checkable in place.
+- [x] Both spike results are recorded in git history: CTC/RNNT head availability
       (Task 9) and Chirp dynamic-batch support (Task 12)
 
-**Deferred to Phase 2 — not met, and deliberately not faked:**
+**Deferred to Phase 2 when this plan was written — both since delivered (status 2026-09-02):**
 
-- [ ] ~~A committed `fixtures/` corpus~~ — **deferred to Phase 2**: recording
-      fixtures needs real audio plus the gated HuggingFace IndicConformer weights,
-      and that spike is blocked (spec §14, Task 9). Manufacturing fixture contents
-      would make the replay suite green against invented transcripts.
-- [ ] ~~A committed `delta_table.json` built from a speaker-disjoint calibration
-      split~~ — **deferred to Phase 2**: requires both blocked spikes plus real
-      Chirp access to measure a genuine tier-over-tier delta. A fabricated table
-      would silently drive `router.plan()` and the headline frontier.
+- [x] ~~A committed `fixtures/` corpus~~ — **DONE.** The blocked spike closed 2026-08-24
+      (spec §14.1: both decoder heads exposed), and `fixtures/` now holds committed Tier 0
+      and Tier 1 replay fixtures for the demo audio. Nothing was manufactured: `make track`
+      replays recorded responses for real committed speech.
+- [x] ~~A committed `delta_table.json` built from a speaker-disjoint calibration
+      split~~ — **DONE, with one clause unverified.** The table was measured live on
+      2026-08-25 (124 Chirp calls, $0.1013) and is committed. **The "speaker-disjoint"
+      half of this criterion cannot be confirmed for that run**: enforcement was only
+      wired into `stratify()` on 2026-09-02, `results/scored.json` never carried
+      `speaker_id`, and the calibration DB that held it no longer exists. The guard
+      protects future tables, not this one — see the README's measured/not-measured table.
 
 `report.frontier()` already degrades correctly without the delta table: every
 delta is 0.0, nothing is eligible to escalate, and the chart is honestly empty

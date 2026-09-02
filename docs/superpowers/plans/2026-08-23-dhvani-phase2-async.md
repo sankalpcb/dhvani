@@ -126,7 +126,7 @@ def risk(f: Features) -> float: ...
   - `Store.get_track(source_id, version) -> dict | None`
   - `Store.latest_track_version(source_id) -> int` — `0` when none
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_store_jobs.py
@@ -197,12 +197,12 @@ def test_latest_track_version_starts_at_zero_and_advances(store):
     assert store.latest_track_version("other") == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_store_jobs.py -v`
 Expected: FAIL with `AttributeError: 'Store' object has no attribute 'put_job'`
 
-- [ ] **Step 3: Extend the schema**
+- [x] **Step 3: Extend the schema**
 
 Append to `SCHEMA` in `dhvani/store.py`:
 
@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 ```
 
-- [ ] **Step 4: Add the methods**
+- [x] **Step 4: Add the methods**
 
 ```python
 # dhvani/store.py  — add near the other Store methods
@@ -319,12 +319,12 @@ JOB_STATES = ("pending", "running", "done", "failed")
         return int(row["v"])
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_store_jobs.py -v`
 Expected: PASS, 9 tests
 
-- [ ] **Step 6: Full suite and commit**
+- [x] **Step 6: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -350,7 +350,7 @@ git commit -m "feat: jobs and versioned tracks tables for async escalation"
 
 This is invariant **I2**. Idempotency comes from keyed replacement, and order-independence from sorting the output.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_track.py
@@ -426,12 +426,12 @@ def test_json_is_stable_for_equal_input():
     assert entries_to_json(_base()) == entries_to_json(list(reversed(_base())))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_track.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.track'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/track.py
@@ -489,12 +489,12 @@ def entries_from_json(payload: str) -> list[TrackEntry]:
     return [TrackEntry(**row) for row in json.loads(payload)]
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_track.py -v`
 Expected: PASS, 9 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -519,7 +519,7 @@ git commit -m "feat: pure idempotent track merge (invariants I1, I2, I5)"
 
 `poll` returns `None` while the job is still pending, or `{segment_id: {"text":…, "signals":…}}` when complete. `SyncAsyncAdapter` makes every downstream component testable with no cloud and no network.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_async_base.py
@@ -597,12 +597,12 @@ def test_cost_per_call_delegates_to_inner():
     assert SyncAsyncAdapter(StubSync()).cost_per_call(_segs()[0]) == 0.004
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_async_base.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.backends.async_base'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/backends/async_base.py
@@ -679,12 +679,12 @@ class SyncAsyncAdapter:
         return {s.segment_id: self.inner.transcribe(s) for s in self._jobs[job_id]}
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_async_base.py -v`
 Expected: PASS, 8 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -715,7 +715,7 @@ test that injects a fake backend and then `AttributeError`s the first time it me
 one. Spend is reserved for the whole batch BEFORE submission, matching the Phase 1 rule that
 money is accounted before the call.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_escalate.py
@@ -810,12 +810,12 @@ def test_resubmitting_the_same_batch_is_idempotent(store):
     assert first == second
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_escalate.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.escalate'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/escalate.py
@@ -893,14 +893,14 @@ def escalate(source_id, entries, segments, backend, store, delta_table,
     return job_id
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_escalate.py -v`
 Expected: PASS, 7 tests
 
 Note: `test_resubmitting_the_same_batch_is_idempotent` asserts the job id repeats. Spend IS reserved twice — that is the deliberate pessimistic-accounting behavior from Phase 1, not a bug.
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -923,7 +923,7 @@ git commit -m "feat: escalate() plans, reserves, and submits an async batch"
     Polls every open job for this backend, merges completed results, writes a new track version. Returns the new version, or the existing latest version when nothing advanced.
     Durations are derived from the track's own entries — no caller needs to supply them.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_reconcile.py
@@ -1027,12 +1027,12 @@ def test_reconcile_never_loses_segments(store):
            sorted(e.segment_id for e in ENTRIES)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_reconcile.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.reconcile'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/reconcile.py
@@ -1113,12 +1113,12 @@ def reconcile(source_id: str, backend, store, samples: dict | None=None) -> int:
     return new_version
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_reconcile.py -v`
 Expected: PASS, 7 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -1143,7 +1143,7 @@ git commit -m "feat: reconciler merges completed jobs into a new track version"
 
 Faults are applied deterministically from `seed`, so a failing chaos test is reproducible.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_chaos.py
@@ -1233,12 +1233,12 @@ def test_unknown_fault_name_is_rejected():
         _chaos(["earthquake"])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_chaos.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.backends.chaos'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/backends/chaos.py
@@ -1316,12 +1316,12 @@ class ChaosBackend:
         return dict(items)
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_chaos.py -v`
 Expected: PASS, 9 tests
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -1341,7 +1341,7 @@ git commit -m "feat: deterministic ChaosBackend fault injection"
 
 This task adds **no production code**. It is the proof that the async path is correct, and it is the single most valuable artifact in Phase 2.
 
-- [ ] **Step 1: Write the invariant suite**
+- [x] **Step 1: Write the invariant suite**
 
 ```python
 # tests/test_invariants.py
@@ -1473,14 +1473,14 @@ def test_i6_convergence_is_reachable_from_a_partial_start(store):
     assert all(e.text.startswith("fixed-") for e in entries)
 ```
 
-- [ ] **Step 2: Run the suite**
+- [x] **Step 2: Run the suite**
 
 Run: `uv run pytest tests/test_invariants.py -v`
 Expected: PASS, 13 tests (6 parametrized I1 + 3 parametrized transient + 3 others)
 
 If `test_i6_convergence_is_reachable_from_a_partial_start` fails, the reconciler is marking partially-delivered jobs `done`. That is a real defect — segments dropped by a partial delivery would never be retried. Fix the reconciler so a job is only marked `done` when its results cover every `segment_id` it registered; otherwise leave it `running`.
 
-- [ ] **Step 3: Full suite and commit**
+- [x] **Step 3: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -1507,7 +1507,7 @@ git commit -m "test: prove invariants I1, I2, I6 hold under injected chaos"
   - `dhvani.metrics.throughput(audio_ms: int, wall_ms: float) -> float` — audio-hours per wall-clock hour
   - CLI flags `--escalate` and `--reconcile`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_metrics.py
@@ -1561,12 +1561,12 @@ def test_throughput_is_zero_when_no_time_elapsed():
     assert throughput(1000, 0.0) == 0.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_metrics.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dhvani.metrics'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # dhvani/metrics.py
@@ -1635,7 +1635,7 @@ def throughput(audio_ms: int, wall_ms: float) -> float:
     return float(audio_ms) / float(wall_ms)
 ```
 
-- [ ] **Step 4: Wire the CLI**
+- [x] **Step 4: Wire the CLI**
 
 Add to `dhvani/cli.py`'s argument list, after `--out`:
 
@@ -1678,14 +1678,14 @@ And after the track is written, inside the `with Store(...)` block:
 
 Add `from dhvani.config import POLICY_ID` and `from dhvani.segmenter import segment as split` to `cli.py`'s imports.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_metrics.py -v`
 Expected: PASS, 9 tests
 
 Then confirm the CLI still parses: `uv run dhvani --help` must list `--escalate` and `--reconcile` and exit 0.
 
-- [ ] **Step 6: Full suite and commit**
+- [x] **Step 6: Full suite and commit**
 
 ```bash
 uv run pytest -q
@@ -1697,12 +1697,12 @@ git commit -m "feat: timing metrics and --escalate/--reconcile CLI flags"
 
 ## Phase 2 Exit Criteria
 
-- [ ] `uv run pytest` passes with no network, no cloud credentials, and no ML dependencies
-- [ ] Invariants I1, I2 and I6 are asserted under six distinct fault combinations
-- [ ] A job partially delivered is retried rather than marked done
-- [ ] Re-reconciling a settled job never advances the track version
-- [ ] `uv run dhvani --help` lists `--escalate` and `--reconcile`
-- [ ] Total external spend recorded in the `spend` ledger is unchanged from Phase 1 (this phase adds no live calls)
+- [x] `uv run pytest` passes with no network, no cloud credentials, and no ML dependencies
+- [x] Invariants I1, I2 and I6 are asserted under six distinct fault combinations
+- [x] A job partially delivered is retried rather than marked done
+- [x] Re-reconciling a settled job never advances the track version
+- [x] `uv run dhvani --help` lists `--escalate` and `--reconcile`
+- [x] Total external spend recorded in the `spend` ledger is unchanged from Phase 1 (this phase adds no live calls) — **$0.1013 at the time, well under the ceiling.** Attested by the run record (`delta_table.json` meta, README) rather than the ledger itself: the calibration DB is gitignored and no longer exists, so this is no longer re-checkable in place.
 
 ## Deferred to Phase 3
 

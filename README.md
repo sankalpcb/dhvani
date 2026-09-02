@@ -279,12 +279,42 @@ need account data — the billing increment — was published policy all along. 
 the mirror image: a number recorded as published turned out to be an account fact. Neither
 direction was safe to assume, and both were cheap to check.
 
-**Still unmeasured:** there is no `tier2` entry in `delta_table.json`, so `--repair` changes
-nothing under the shipped table. Measuring a real Tier 2 delta needs more than a key: there is
-no `dhvani-calibrate repair` phase yet, and the references and Tier 0 hypotheses a delta is
-computed from lived in a calibration DB that no longer exists — so it also needs a `collect`
-re-run. Free in money, not in time. Full detail in
-[the design](docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md) §8.
+### Measured: Tier 2 does not help either
+
+`dhvani-calibrate repair` ran live on 2026-09-02 over the same 100 speaker-disjoint segments,
+**free**, scored against Tier 0 — which is what Tier 2 actually repairs, since nothing
+escalates to Tier 1 under this table.
+
+```json
+"tier2": { "0.0-0.1": -2.56 }
+```
+
+Negative, so I3 excludes it and the router escalates to Tier 2 exactly as often as it escalates
+to Tier 1: never. Both refusals are now backed by measurement rather than by an absent entry.
+
+What the model actually did is more interesting than the average:
+
+| | |
+|---|---|
+| Left the text alone | **89 of 100** |
+| Changed it | 11 — of which **1 better, 8 worse** |
+
+The conservatism is the design working: the prompt says preserve the speaker's words, and it
+mostly does. The failures are the instructive part.
+
+**It inverted the very defect it exists to fix.** One reference spells digits out in English
+words (`थ्री फोर फाइव सिक्स`), Tier 0 transcribed it correctly, and Tier 2 "corrected" it *to*
+`3456` — the exact opposite of its own instruction to write numbers as words. toWER went 0.193
+→ 0.404.
+
+**It corrected toward its own priors, not the reference.** `पेन कार्ड` → `पैन कार्ड` is
+arguably better Hindi for "PAN card", but the reference says `पेन`, so a defensible linguistic
+improvement scores as pure loss: 0.000 → 0.184.
+
+One candidate artifact was checked and **ruled out**: the model's orthography varied between
+calls in early testing (`हजार` vs `हज़ार`), and `normalize_orthography` folds candrabindu and
+anusvara but not nukta — so nukta variance was a plausible culprit. It is not: **0 of 100**
+pairs differ in nukta presence. The −2.56 is real, not a normalization artifact.
 
 ## Calibrating it yourself
 
@@ -314,18 +344,20 @@ as a noisy average.
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
 | Digit/number mismatch | **measured, deliberately unfixed** — ~10% of the corpus; needs a per-language number lexicon, so it is counted against Tier 1 rather than folded away. Its direction inflates Tier 1's measured deficit |
 | Speaker-disjointness of the shipped table | **enforced and verified** — 150 utterances from 150 speakers, one each; `stratify()` refuses to select a repeat, and `results/scored.json` now carries `speaker_id`. The previous table could not be checked this way, which is why it was withdrawn rather than kept |
-| Gemini repair path | **verified live** — 2026-09-02, free-tier key, `gemini-3.5-flash-lite`; digits expanded, clean text untouched, romanized code-mix restored. A recorded fixture replays it offline |
-| Gemini repair *delta* | **never measured** — no `tier2` entry exists. Needs a `dhvani-calibrate repair` phase (unbuilt) plus a `collect` re-run, since the references it would score against are gone |
+| Gemini repair path | **verified live** — 2026-09-02, `gemini-3.5-flash-lite`; a recorded fixture replays it offline |
+| Gemini repair *delta* | **measured** — −2.56 over 100 speaker-disjoint segments, 2026-09-02, $0.00. Changed 11 of 100; 1 better, 8 worse |
 | Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |
-| Gemini free-tier requests/day | **not knowable from docs** — Google no longer publishes it; it is a per-project fact behind an AI Studio login, so the configured cap is a local ceiling, not the vendor's |
+| Gemini free-tier rate | **measured** — 15 requests/minute per project per model, returned in a live 429 (`quotaValue: 15`). The daily cap is still not published; the configured one is a local ceiling |
 | Gemini model id | **namespace confirmed, choice open** — `gemini-2.0-flash` is retired; a Flash-class 2.5/3.x id is read from `GEMINI_MODEL` rather than guessed |
 
-Two honest limits sit in that table. The router has **no evidence about high-risk segments**,
-because none occurred in the corpus — that is the ceiling on what the Tier 1 table can claim.
-And it has **no evidence about Tier 2 at all**: the machinery is complete and the measurement
-is not, which is the same order this project ran for Tier 1. Measuring Tier 2 costs no money, but it is not
-one command away: the calibration phase for it is unbuilt, and the data a delta would be
-scored against was lost with the calibration DB.
+One honest limit remains in that table: the router has **no evidence about high-risk
+segments**, because none occurred in the corpus. That is the ceiling on what either tier's
+table can claim, and no larger sample of this corpus would lift it.
+
+Everything else is now measured. Both paid-for tiers were asked the same question — *does this
+help enough to be worth doing?* — and both answered no, on 150 speakers, for **$0.052 and
+nothing** respectively. A cascade whose upper tiers are both switched off by their own
+measurements is a strange-looking result, and it is the one the evidence supports.
 
 The three Gemini rows below the delta also record which *kind* of fact each one is, because
 that turned out to matter: the reset boundary was published policy the code had wrongly

@@ -309,7 +309,9 @@ Three console scripts: `dhvani` (transcribe), `dhvani-bench` (frontier report),
 `dhvani-calibrate` (measure).
 
 Optional extras, all genuinely optional: `models` (torch/transformers/onnxruntime), `cloud`
-(google-cloud-speech), `data` (datasets). The test suite passes with none of them installed.
+(google-cloud-speech), `data` (datasets), `repair` (google-genai). The test suite passes with
+none of them installed — 4 of the 433 skip without `data`, and the skip is deliberate rather
+than incidental.
 
 ## Attribution
 

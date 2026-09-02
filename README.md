@@ -10,7 +10,7 @@ produces the evidence it consults.
 ```bash
 git clone <this repo> && cd Youtube
 uv sync --extra dev           # pytest only — no ML dependencies needed
-make test                     # 433 tests, offline (4 skip without the data extra)
+make test                     # 450 tests, offline (4 skip without the data extra)
 make track                    # captions a real Hindi clip, no model, no network
 ```
 
@@ -129,6 +129,22 @@ reordering, duplication, transient errors):
 - **I1** no loss · **I2** idempotent merge · **I3** no negative-value escalation
 - **I4** budget respected · **I5** determinism · **I6** convergence
 
+**Zero data loss across 1,000 injected failures.** Not six hand-picked fault combinations —
+a stratified campaign (`tests/test_campaign.py`) that instruments the fault injector and
+counts what it actually injected, stopping at 1,000. It runs offline in under a second.
+
+```
+233 trials, 1,000 injected failures, 1,864 segment assertions
+  117 trials  merge path      — every segment merged exactly once
+  116 trials  dead-letter path — every poll raised, track left intact
+```
+
+The stratification is the part worth knowing. Drawing faults uniformly put ~80% of trials in
+the dead-letter regime, because a fault set is fatal if it contains *any* raising fault — so
+the campaign hit its number while barely exercising the merge path, which is the half where
+loss could actually occur. The plan now alternates regimes and the test asserts the balance
+rather than trusting it.
+
 **Quota** is guarded the same way money is, because it is the same problem in another
 currency. `Store.reserve_quota()` claims a request against the daily free-tier cap in one
 atomic statement before the call. The per-minute rate is handled separately by an in-process
@@ -143,7 +159,7 @@ crash cannot under-count and let the $20 ceiling be breached on restart.
 ## Running it offline
 
 ```bash
-make test    # 433 tests: no torch, no cloud SDK, no credentials, no network
+make test    # 450 tests: no torch, no cloud SDK, no credentials, no network
 make track   # captions samples/fleurs-hi-*.wav from committed fixtures
 make bench   # cost/quality frontier from the measured delta table
 ```
@@ -297,7 +313,7 @@ the dominant cost line inherits its error.
 ```
 dhvani/            29 modules — segmenter, scorer, router, escalate, reconcile,
                    repair, quota, store, CLIs
-tests/             35 files, 433 tests
+tests/             36 files, 450 tests
 fixtures/          committed replay fixtures (Tier 0 and Tier 1)
 samples/           committed demo audio + attribution; the illustrative delta table
 docs/superpowers/  design specs, the three implementation plans, the scaling sketch
@@ -310,7 +326,7 @@ Three console scripts: `dhvani` (transcribe), `dhvani-bench` (frontier report),
 
 Optional extras, all genuinely optional: `models` (torch/transformers/onnxruntime), `cloud`
 (google-cloud-speech), `data` (datasets), `repair` (google-genai). The test suite passes with
-none of them installed — 4 of the 433 skip without `data`, and the skip is deliberate rather
+none of them installed — 4 of the 450 skip without `data`, and the skip is deliberate rather
 than incidental.
 
 ## Attribution

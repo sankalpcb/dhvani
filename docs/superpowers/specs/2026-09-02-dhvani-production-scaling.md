@@ -22,7 +22,7 @@ Extrapolation is only as good as its inputs, so these are separated by provenanc
 | Tier 1 latency | mean 2.34 s, p50 ∈ [1.05, 2.10) s, p99 ∈ [4.19, 8.39) s | **measured** — Google `api/request_latencies`, 124 samples, server-side |
 | Tier 1 success rate | 124/125 attempts reached the service | **measured** — `api/request_count`, zero 5xx for `Recognize` |
 | Tier 0 transcribe time | 1.85 s per utterance | **measured** — 2026-08-25, on an 8-core Apple M1 |
-| Tier 0 real-time factor | ≈ 0.26 core-s per audio-s | **derived** — 1.85 / 7.13; see the caveat below |
+| Tier 0 real-time factor | **0.337** core-s per audio-s | **measured** 2026-09-02 — 30 segments, 253.5 s of audio, thread count pinned, on an e2-standard-4 |
 | Tier 1 rate | $0.004 / audio-minute | **published** — Dynamic Batch, 75% below Standard's $0.016 |
 | Tier 1 billing increment | 1 s | **published** — Speech-to-Text V2; not yet corroborated against an invoice |
 | Cloud Run vCPU | $0.000024 / vCPU-s | **published**, region-dependent, dated 2026-09 |
@@ -32,13 +32,25 @@ Extrapolation is only as good as its inputs, so these are separated by provenanc
 | Pub/Sub | $40 / TiB delivered | **published**, dated 2026-09 |
 | Dedup cache hit rate | **unknown** | **assumed 0** throughout — see §7 |
 
-**The RTF caveat is the load-bearing one.** 0.26 is one process on one developer laptop, and
-the thread count of that process was never pinned. If IndicConformer was quietly using four M1
-cores, the true per-core figure is nearer 1.04 and every compute number in §5 is ~4× optimistic.
-Server-class inference, batching, and GPU/TPU serving all push the other way. **This single
-constant should be re-measured under controlled parallelism before anyone quotes §5 to a
-stranger.** It is the largest source of error in this document, larger than every pricing
-assumption combined.
+**The RTF caveat is CLOSED (2026-09-02).** It has been re-measured under controlled
+parallelism, and the answer is both better and more interesting than feared.
+
+| threads | wall | core-s | RTF | ×realtime |
+|---|---|---|---|---|
+| 1 | 85.4 s | 85.4 | **0.337** | 3.0× |
+| 2 | 85.3 s | 170.5 | 0.672 | 3.0× |
+| 4 | 101.6 s | 406.4 | 1.603 | 2.5× |
+
+**IndicConformer does not parallelise.** Wall time is identical at one and two threads and
+*worse* at four — extra threads buy nothing and add contention. That is why the original
+laptop figure was close despite never pinning threads: the process was effectively
+single-threaded no matter how many cores it had. The correction is **1.30×**, not the ~4× this
+section previously warned about.
+
+It changes the numbers below and it changes the deployment shape: Tier 0 scales
+**horizontally**, by running more single-threaded processes, not by giving one process more
+cores. A capacity plan that budgets 4-vCPU workers and assumes 4× the throughput would be
+wrong by that factor.
 
 ---
 
@@ -134,18 +146,21 @@ concurrent misses on one key produce one backend read.
 ### 5.1 Tier 0 compute — the dominant cost
 
 ```
-2.592 × 10⁹ audio-s/day × 0.26 core-s/audio-s = 6.74 × 10⁸ core-s/day
-                                              ÷ 86,400 s
-                                              ≈ 7,800 cores steady-state
+2.592 × 10⁹ audio-s/day × 0.337 core-s/audio-s = 8.73 × 10⁸ core-s/day
+                                               ÷ 86,400 s
+                                               ≈ 10,110 cores steady-state
 ```
 
-Per million audio-hours: `10⁶ × 3600 × 0.26 = 9.36 × 10⁸ core-seconds = 260,000 core-hours`.
+Per million audio-hours: `10⁶ × 3600 × 0.337 = 1.21 × 10⁹ core-seconds = 337,000 core-hours`.
 
 | | per million audio-hours |
 |---|---|
-| vCPU @ $0.000024/vCPU-s | $22,464 |
-| Memory @ 2 GiB/worker | $4,680 |
-| **Tier 0 total** | **≈ $27,100** |
+| vCPU @ $0.000024/vCPU-s | $29,117 |
+| Memory @ 2 GiB/worker | $6,066 |
+| **Tier 0 total** | **≈ $35,200** |
+
+Single-threaded workers, per the measurement above — 10,110 processes, not 2,528 four-core
+ones.
 
 That is the on-demand Cloud Run upper bound. A fleet with a 7,800-core floor is not an
 on-demand workload — committed-use discounts or GKE spot capacity would cut it substantially,
@@ -188,17 +203,17 @@ permit.
 
 | escalation rate | Tier 1 | Tier 0 | storage + queue | **total** | vs Chirp-only |
 |---|---|---|---|---|---|
-| **0%** — the currently measured table | $0 | $27,100 | ~$500 | **$27,600** | **9.3× cheaper** |
-| 1% | $2,568 | $27,100 | ~$500 | **$30,200** | 8.5× |
-| 5% | $12,840 | $27,100 | ~$500 | **$40,400** | 6.4× |
-| 10% | $25,680 | $27,100 | ~$500 | **$53,300** | 4.8× |
-| 25% | $64,200 | $27,100 | ~$500 | **$91,800** | 2.8× |
-| 100% | $256,800 | $27,100 | ~$500 | **$284,400** | 0.9× (worse) |
-| *Chirp-only baseline* | $256,800 | — | ~$500 | **$257,300** | 1.0× |
+| **0%** — the measured table | $0 | $35,200 | ~$500 | **$35,700** | **7.2× cheaper** |
+| 1% | $2,568 | $35,200 | ~$500 | **$38,300** | 6.7× |
+| 5% | $12,842 | $35,200 | ~$500 | **$48,500** | 5.3× |
+| 10% | $25,683 | $35,200 | ~$500 | **$61,400** | 4.2× |
+| 25% | $64,208 | $35,200 | ~$500 | **$99,900** | 2.6× |
+| 100% | $256,831 | $35,200 | ~$500 | **$292,500** | 0.9× (worse) |
+| *Chirp-only baseline* | $256,831 | — | ~$500 | **$257,300** | 1.0× |
 
 Two things this table says that are easy to miss:
 
-**The cascade stops paying for itself somewhere near 90% escalation** — past that, Tier 0
+**The cascade stops paying for itself at 86% escalation** — past that, Tier 0
 compute is pure overhead on top of a bill you were going to pay anyway. The architecture is
 only justified by escalating *selectively*, which is the router's entire job.
 
@@ -236,7 +251,7 @@ one machine and is the difference between $3/day and $3,000/day across a network
 Every figure above assumes a **0% cache hit rate** — every segment transcribed as if never
 seen. Content-addressing makes the dedup mechanism free and exact, and at scale it is
 plausibly the single largest cost lever: Tier 0 cost scales directly with `(1 − hit_rate)`, so
-a 30% duplicate rate removes ~$8,100 per million audio-hours, more than every storage and
+a 30% duplicate rate removes ~$10,600 per million audio-hours, more than every storage and
 queue line combined.
 
 YouTube-shaped corpora should carry real duplication — re-uploads, Shorts remixes of the same
@@ -277,8 +292,8 @@ latency from the slowest, least reliable, most expensive component.
 
 ## 9. What this sketch does not establish
 
-- **The RTF constant (§1).** Measured on one laptop with unpinned thread count. Everything in
-  §5.1 inherits its error, and §5.1 is the dominant cost line.
+- ~~The RTF constant~~ **CLOSED** — measured 2026-09-02 at 0.337 core-s/audio-s with threads
+  pinned; §5.1 updated. The model does not parallelise, so Tier 0 scales horizontally.
 - **The cache hit rate (§7).** Assumed zero. Could move total cost by tens of percent.
 - **Escalation rate on real audio (§5.4).** The 0% row comes from 150 read-speech utterances.
   YouTube audio is a different distribution and the delta table has no evidence about it.

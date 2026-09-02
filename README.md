@@ -369,15 +369,19 @@ assumed needed an account, and the requests-per-day figure was the reverse.
 capacity and cost math at 720,000 audio-hours/day — written, not built, as spec §12 asks.
 
 At that rate the system sees **4,207 segments/second**. Tier 0 compute dominates at roughly
-**$27,100 per million audio-hours**, against **$256,800** for routing everything to Chirp, so
-the cascade is ~9.3x cheaper at the measured 0% escalation rate and stops paying for itself
-somewhere near 90%. `segment_id` being a SHA256 turns out to be a near-ideal Bigtable row key
-by accident — uniform by construction, immutable, so hot rows are cacheable with no
-invalidation — at the cost of scan locality, which is why `tracks` is keyed separately.
+**$35,200 per million audio-hours**, against **$256,800** for routing everything to Chirp, so
+the cascade is ~7.2x cheaper at the measured 0% escalation rate and stops paying for itself at
+86%. `segment_id` being a SHA256 turns out to be a near-ideal Bigtable row key by accident —
+uniform by construction, immutable, so hot rows are cacheable with no invalidation — at the
+cost of scan locality, which is why `tracks` is keyed separately.
 
-Every figure is labelled measured, published or assumed. The single largest source of error is
-named up front: Tier 0's real-time factor came off one laptop with unpinned thread count, and
-the dominant cost line inherits its error.
+Every figure is labelled measured, published or assumed. The document's own largest caveat has
+since been **closed by measurement**: Tier 0's real-time factor was 0.26 derived from an
+unpinned laptop run, and is now **0.337 measured with threads pinned**. The correction is 1.30x,
+not the ~4x the sketch feared — and the reason is worth more than the number. IndicConformer
+**does not parallelise**: wall time is identical at one and two threads and worse at four. So
+the laptop figure was near-right by accident, and Tier 0 scales horizontally, by running more
+single-threaded processes, not by giving one process more cores.
 
 ## Layout
 

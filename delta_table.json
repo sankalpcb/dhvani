@@ -22,9 +22,25 @@
     "segments_escalated": 100,
     "segments_selected": 100,
     "spend_usd": 0.052267,
-    "tier": "tier1"
+    "tier": [
+      "tier1",
+      "tier2"
+    ],
+    "tier2_meta": {
+      "baseline": "tier0",
+      "bucket_n": {
+        "0.0-0.1": 100
+      },
+      "measured_at": "2026-09-02",
+      "note": "Tier 2 was scored against Tier 0, which is what it actually repairs: nothing escalates to Tier 1 under this table, so Tier 0's text is the input a deployed Tier 2 receives.",
+      "segments_measured": 100,
+      "spend_usd": 0.0
+    }
   },
   "tier1": {
     "0.0-0.1": -22.71882343069545
+  },
+  "tier2": {
+    "0.0-0.1": -2.562048007950912
   }
 }

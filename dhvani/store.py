@@ -29,6 +29,7 @@ import time
 
 from dhvani.config import MAX_SPEND_USD
 from dhvani.ids import hypothesis_key
+from dhvani.quota import QuotaExhausted
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (
@@ -57,6 +58,15 @@ CREATE TABLE IF NOT EXISTS spend (
   cost_usd   REAL NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS quota (
+  tier       TEXT NOT NULL,
+  day        TEXT NOT NULL,
+  used       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_tier_day ON quota (tier, day);
 
 CREATE TABLE IF NOT EXISTS jobs (
   job_id       TEXT PRIMARY KEY,
@@ -239,6 +249,45 @@ class Store:
             raise BudgetExceeded(
                 f"call costing ${cost_usd:.4f} would exceed ceiling: "
                 f"${projected:.4f} > ${MAX_SPEND_USD:.2f}"
+            )
+
+    def quota_used(self, tier: str, day: str) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(used), 0) AS u FROM quota WHERE tier = ? AND day = ?",
+            (tier, day),
+        ).fetchone()
+        return int(row["u"])
+
+    def reserve_quota(self, tier: str, day: str, cap: int, n: int = 1) -> None:
+        """Atomically claim n requests against a tier's daily cap, or raise.
+
+        The same single-statement discipline as reserve_spend(), and for
+        the same reason: a SELECT-then-INSERT pair lets two Store handles
+        on one DB read the same stale total, both conclude there is room,
+        and both write -- ending over the cap with neither raising. See
+        the FIX ROUND 2 (C1) note at the top of this module. Quota is
+        cheaper to over-run than money, but the free tier's daily ceiling
+        is a hard wall until midnight, so the same care applies.
+
+        Reserved BEFORE the call, like spend, so a crash between reserving
+        and calling over-counts by one request. Over-counting quota fails
+        safe: it only makes the gate more conservative.
+
+        Rows are appended rather than a single row being updated, which is
+        what keeps this one statement instead of a read-modify-write.
+        """
+        cur = self.conn.execute(
+            "INSERT INTO quota (tier, day, used, created_at) "
+            "SELECT ?, ?, ?, ? "
+            "WHERE (SELECT COALESCE(SUM(used), 0) FROM quota WHERE tier = ? AND day = ?) + ? <= ?",
+            (tier, day, n, int(time.time()), tier, day, n, cap),
+        )
+        self.conn.commit()
+        if cur.rowcount != 1:
+            used = self.quota_used(tier, day)
+            raise QuotaExhausted(
+                f"{tier} daily quota exhausted for {day}: "
+                f"{used} + {n} would exceed {cap}"
             )
 
     def put_job(self, job_id, tier, variant_key, segment_ids, source_id) -> bool:

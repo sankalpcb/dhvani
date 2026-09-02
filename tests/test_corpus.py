@@ -212,9 +212,17 @@ def test_a_row_with_no_usable_audio_is_skipped_not_crashed():
 
 
 def _write_shard(path, rows):
-    """A parquet file shaped like a real IndicVoices shard."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    """A parquet file shaped like a real IndicVoices shard.
+
+    pyarrow ships with the `data` extra, not with `dev`. These four tests were
+    written while `datasets` happened to be installed and so passed by
+    accident; on the install the README actually documents
+    (`uv sync --extra dev`) they were failing on ModuleNotFoundError. Skipping
+    is the honest outcome -- it keeps G5 ("green suite with no ML, cloud or
+    data deps") a property the suite enforces rather than one it only claims.
+    """
+    pa = pytest.importorskip("pyarrow", reason="needs the `data` extra")
+    pq = pytest.importorskip("pyarrow.parquet", reason="needs the `data` extra")
     pq.write_table(pa.Table.from_pylist(rows), path)
     return str(path)
 

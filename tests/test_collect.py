@@ -425,3 +425,21 @@ def test_a_collected_corpus_stratifies_to_one_row_per_speaker(tmp_path):
 
     assert disjoint_by(selected, "speaker_id") is True
     assert len(selected) == 1, f"one speaker yielded {len(selected)} samples"
+
+
+def test_collect_passes_the_speaker_cap_to_the_corpus(tmp_path):
+    """The cap has to reach the corpus, not merely exist as an argument.
+    A 150-utterance run that draws 18 speakers produces a table that cannot
+    be published under the §9.4 guard."""
+    corpus = FakeCorpus([
+        (0.3 * np.random.default_rng(i).standard_normal(32000), 16000,
+         f"ref-{i}", "hi-IN", "dominant" if i < 6 else f"spk{i}", "D")
+        for i in range(10)
+    ])
+    with Store(":memory:") as store:
+        scored = collect(corpus, lambda lang: StubTier0(lang), store,
+                         ["hi-IN"], 10, str(tmp_path), max_per_speaker=1)
+
+    speakers = [r["speaker_id"] for r in scored]
+    assert len(speakers) == len(set(speakers)), f"repeated speaker: {speakers}"
+    assert speakers.count("dominant") == 1

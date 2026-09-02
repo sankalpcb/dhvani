@@ -155,6 +155,17 @@ def _extract_item_from_row(row: dict, lang: str) -> CorpusItem | None:
     )
 
 
+def _speaker_is_full(per_speaker: dict, speaker, max_per_speaker) -> bool:
+    """True when this speaker has already contributed its allowance.
+
+    A None speaker is never capped: absent metadata is not a collision,
+    which is the same rule disjoint_by() applies.
+    """
+    if not max_per_speaker or speaker is None:
+        return False
+    return per_speaker.get(speaker, 0) >= max_per_speaker
+
+
 def disjoint_by(items, key: str) -> bool:
     """True when no non-None value of `key` repeats across items.
 
@@ -188,14 +199,20 @@ class FakeCorpus:
         # default is deliberately not a plausible dataset name.
         self.dataset_id = dataset_id
 
-    def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
+    def stream(self, lang: str, limit: int,
+               max_per_speaker: int | None = None) -> Iterator[CorpusItem]:
         count = 0
+        per_speaker: dict = {}
         for raw, rate, reference, item_lang, speaker, district in self._items:
             if item_lang != lang:
                 continue
             if count >= limit:
                 return
+            if _speaker_is_full(per_speaker, speaker, max_per_speaker):
+                continue
             yield _make_item(raw, rate, reference, item_lang, speaker, district)
+            if speaker is not None:
+                per_speaker[speaker] = per_speaker.get(speaker, 0) + 1
             count += 1
 
 
@@ -223,8 +240,22 @@ class IndicVoicesCorpus:
 
         return hf_hub_download(self.dataset_id, name, repo_type="dataset")
 
-    def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
+    def stream(self, lang: str, limit: int,
+               max_per_speaker: int | None = None) -> Iterator[CorpusItem]:
         """Yield up to `limit` utterances for one language.
+
+        max_per_speaker bounds how many utterances ONE speaker may
+        contribute, and it exists because of a measured failure. IndicVoices
+        shards are grouped by speaker, so reading rows sequentially returns
+        very few of them: a real 150-utterance collect on 2026-09-02 drew
+        from just 18 speakers, one of whom supplied 45. stratify() then
+        enforces spec §9.4 speaker-disjointness and selected 16 -- below the
+        publication floor, so no table could be written. The corpus has
+        16,237 speakers; the sampler was finding 18 of them.
+
+        The cap is applied BEFORE _extract_item_from_row(), which decodes
+        audio. Filtering after the decode would pay the expensive part of
+        the work for every row it then throws away.
 
         Reads downloaded parquet shards rather than `datasets` streaming.
         Streaming was not merely slower -- it was unusable: 29 minutes of
@@ -248,6 +279,7 @@ class IndicVoicesCorpus:
         count = 0
         rows_examined = 0
         sample_row = None
+        per_speaker: dict = {}
 
         for shard in self.shard_names(config):
             if count >= limit:
@@ -261,6 +293,13 @@ class IndicVoicesCorpus:
                     rows_examined += 1
                     if sample_row is None:
                         sample_row = row
+
+                    # Before the decode, deliberately: this is the cheap
+                    # half of the row and the skip must not pay for audio
+                    # it will discard.
+                    if _speaker_is_full(per_speaker, row.get("speaker_id"),
+                                        max_per_speaker):
+                        continue
 
                     item = _extract_item_from_row(row, lang)
                     if item is None:
@@ -281,4 +320,7 @@ class IndicVoicesCorpus:
                         continue
 
                     yield item
+                    if item.speaker_id is not None:
+                        per_speaker[item.speaker_id] = (
+                            per_speaker.get(item.speaker_id, 0) + 1)
                     count += 1

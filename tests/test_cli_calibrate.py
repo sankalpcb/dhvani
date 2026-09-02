@@ -717,3 +717,38 @@ def test_repair_reports_a_missing_scored_file(tmp_path, capsys):
                  "--out", str(tmp_path / "t.json")])
     assert code == 1
     assert "collect" in capsys.readouterr().err
+
+
+def test_collect_help_names_the_speaker_cap(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["collect", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--max-per-speaker" in out
+
+
+def test_collect_defaults_the_speaker_cap_to_one(tmp_path, monkeypatch, capsys):
+    """Default 1, because stratify() selects at most one per speaker anyway --
+    collecting more is work whose extra rows can never be selected."""
+    seen = {}
+
+    class _Corpus:
+        dataset_id = "test/ds"
+
+        def stream(self, lang, limit, max_per_speaker=None):
+            seen["cap"] = max_per_speaker
+            return iter(())
+
+    import dhvani.cli_calibrate as mod
+    monkeypatch.setattr(mod, "collect",
+                        lambda corpus, mk, store, langs, per_lang, cache,
+                               max_per_speaker=None: (
+                            seen.__setitem__("cap", max_per_speaker), [])[1])
+    monkeypatch.setattr("dhvani.corpus.IndicVoicesCorpus", lambda *a, **k: _Corpus())
+
+    main(["collect", "--db", str(tmp_path / "c.db"),
+          "--langs", "hi-IN", "--per-lang", "1",
+          "--scored-out", str(tmp_path / "s.json"),
+          "--pcm-cache", str(tmp_path / "pcm")])
+
+    assert seen["cap"] == 1, f"cap not passed through: {seen}"

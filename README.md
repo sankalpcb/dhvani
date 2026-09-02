@@ -192,10 +192,21 @@ be permanently unreachable. It repairs Tier 1's text when Tier 1 ran and Tier 0'
 not.
 
 ```bash
-export GEMINI_MODEL=gemini-2.5-flash-lite     # required; never defaulted, see below
+export GEMINI_MODEL=gemini-3.5-flash-lite     # required; never defaulted, see below
 dhvani clip.wav --repair                      # repair what the delta table says is worth it
 dhvani clip.wav --repair --repair-quota 0     # watch it degrade
 ```
+
+Verified live on 2026-09-02 against a free-tier key. The repair does what the tier exists for:
+
+| in | out |
+|---|---|
+| `मैंने 3456 रुपये दिए` | `मैंने तीन हजार चार सौ छप्पन रुपये दिए` |
+| `कुतूहल गाँव में आधे घंटे टहलना…` (already clean) | *unchanged* |
+| `meine 3456 rupaye diye` | `मैंने तीन हज़ार चार सौ छप्पन रुपये दिए` |
+
+The digit gap closes, clean input is left alone rather than gratuitously rewritten, and
+romanized code-mix is restored to script and de-digitised in one pass.
 
 The free tier imposes two limits, and they are handled differently on purpose. The **daily cap
 is a consumable** — over-running it is unrecoverable until the reset — so it fails closed
@@ -230,9 +241,13 @@ not, and would authorize up to **twice the cap** inside one Google day — the o
 direction the whole reservation discipline exists to prevent. Now keyed with `ZoneInfo`, not a
 fixed offset, because Pacific moves an hour with daylight saving.
 
-**A guessed model id would have been retired.** `gemini-2.0-flash` is shut down; the current
-line is `gemini-3.7-flash`, `3.5-flash`, `2.5-flash-lite` and siblings. `GEMINI_MODEL` is read
-from the environment and has no default, which is why the guess was never made.
+**A guessed model id would have been retired — and listing is not availability.** This one
+turned out sharper than expected. `gemini-2.0-flash` is shut down, and when a real key was
+tried on 2026-09-02, `gemini-2.5-flash-lite` — which `models.list()` returns, and which this
+README recommended — **404s for new keys**: *"no longer available to new users… use
+models/gemini-3.5-flash-lite."* So enumerating models tells you what exists, not what your key
+may call, and the only way to know is to call one. `GEMINI_MODEL` has no default precisely so
+this fails loudly at configuration rather than silently at scale.
 
 **The daily limit is not knowable from documentation**, which inverts what the spec recorded.
 Google no longer publishes free-tier figures — they are per-project facts behind an AI Studio
@@ -245,8 +260,11 @@ need account data — the billing increment — was published policy all along. 
 the mirror image: a number recorded as published turned out to be an account fact. Neither
 direction was safe to assume, and both were cheap to check.
 
-**Still unmeasured:** there is no `tier2` entry in `delta_table.json`, so `--repair` currently
-changes nothing on real data. Measuring it costs nothing but needs a key. Full detail in
+**Still unmeasured:** there is no `tier2` entry in `delta_table.json`, so `--repair` changes
+nothing under the shipped table. Measuring a real Tier 2 delta needs more than a key: there is
+no `dhvani-calibrate repair` phase yet, and the references and Tier 0 hypotheses a delta is
+computed from lived in a calibration DB that no longer exists — so it also needs a `collect`
+re-run. Free in money, not in time. Full detail in
 [the design](docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md) §8.
 
 ## Calibrating it yourself
@@ -277,7 +295,8 @@ as a noisy average.
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
 | Digit/number mismatch | **measured, deliberately unfixed** — ~10% of the corpus; needs a per-language number lexicon, so it is counted against Tier 1 rather than folded away. Its direction inflates Tier 1's measured deficit |
 | Speaker-disjointness of the shipped table | **permanently unverifiable** — enforcement was wired in on 2026-09-02, after the run. The speaker metadata lived only in the calibration DB, which is gitignored and no longer exists; `results/scored.json` never carried the field and the committed fixtures cover only the demo audio. The guard protects future tables, not this one |
-| Gemini repair delta | **never measured** — the tier is built and gated, but no `tier2` entry exists, so `--repair` changes nothing on real data |
+| Gemini repair path | **verified live** — 2026-09-02, free-tier key, `gemini-3.5-flash-lite`; digits expanded, clean text untouched, romanized code-mix restored. A recorded fixture replays it offline |
+| Gemini repair *delta* | **never measured** — no `tier2` entry exists. Needs a `dhvani-calibrate repair` phase (unbuilt) plus a `collect` re-run, since the references it would score against are gone |
 | Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |
 | Gemini free-tier requests/day | **not knowable from docs** — Google no longer publishes it; it is a per-project fact behind an AI Studio login, so the configured cap is a local ceiling, not the vendor's |
 | Gemini model id | **namespace confirmed, choice open** — `gemini-2.0-flash` is retired; a Flash-class 2.5/3.x id is read from `GEMINI_MODEL` rather than guessed |
@@ -285,8 +304,9 @@ as a noisy average.
 Two honest limits sit in that table. The router has **no evidence about high-risk segments**,
 because none occurred in the corpus — that is the ceiling on what the Tier 1 table can claim.
 And it has **no evidence about Tier 2 at all**: the machinery is complete and the measurement
-is not, which is the same order this project ran for Tier 1. Measuring Tier 2 is free, so what
-is missing there is an API key rather than a budget.
+is not, which is the same order this project ran for Tier 1. Measuring Tier 2 costs no money, but it is not
+one command away: the calibration phase for it is unbuilt, and the data a delta would be
+scored against was lost with the calibration DB.
 
 The three Gemini rows below the delta also record which *kind* of fact each one is, because
 that turned out to matter: the reset boundary was published policy the code had wrongly

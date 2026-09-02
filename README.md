@@ -22,16 +22,36 @@ GPU, no cloud credentials, no downloads. That property is the point, not a conve
 
 ## The finding
 
-The calibration ran for real on 2026-08-25: 150 IndicVoices utterances (50 each Hindi,
-Kannada, Malayalam) scored locally, 124 escalated to Google Chirp 2 live, **$0.10 total**.
+The calibration ran for real on 2026-09-02: 150 IndicVoices utterances (50 each Hindi,
+Kannada, Malayalam) from **150 distinct speakers**, scored locally, 100 escalated to Google
+Chirp 2 live, **$0.052 total**.
 
 ```json
-"tier1": { "0.0-0.1": -17.91,  "0.1-0.2": -14.75 }
+"tier1": { "0.0-0.1": -22.72 }
 ```
 
-**Both deltas are negative.** Tier 1 transcribes this corpus *worse* than Tier 0, so the
-shipped `delta_table.json` makes the router escalate nothing at all. `plan()` excludes non-positive delta by construction (invariant I3), so the table is
-self-enforcing.
+**The delta is negative.** Tier 1 transcribes this corpus *worse* than Tier 0, so the shipped
+`delta_table.json` makes the router escalate nothing at all. `plan()` excludes non-positive
+delta by construction (invariant I3), so the table is self-enforcing.
+
+### It was measured twice, and the second time was the honest one
+
+An earlier run on 2026-08-25 reported −17.91 and −14.75 across two buckets. That table was
+**withdrawn**, because the sampler was broken in a way nothing noticed until a speaker-
+concentration report was added: `stream()` read IndicVoices parquet rows in shard order, and
+those shards are grouped by speaker, so 150 utterances came from **18 speakers — one of them
+supplying 45 of them.** Spec §9.4 is explicit that a speaker appearing repeatedly lets the risk
+function learn speaker identity as a difficulty proxy, and that then "all reported numbers are
+fiction".
+
+The fix caps utterances per speaker at the source. Re-measured on 150 distinct speakers, one
+utterance each, **the finding did not merely survive — it strengthened**, from −17.91 to
+−22.72. Chirp is worse on this corpus by a wider margin than the flawed sample suggested.
+
+Two things were lost in the trade, and both are the floor working rather than a regression.
+The second bucket (`0.1-0.2`) fell to 12 samples once sampling spread across speakers, so it
+is below `MIN_BUCKET_SAMPLES` and omitted rather than published as a 12-sample average. And
+100 segments were escalated rather than 124, because speaker-disjointness caps selection.
 
 That is a result, not a broken run, and it is the one worth having. AI4Bharat's
 IndicConformer 600M is purpose-built for Indic languages; Chirp 2 is general multilingual,
@@ -44,10 +64,9 @@ artifacts were measured rather than waved away: 0 of 124 Tier 1 transcripts were
 normalization (`3456` where the reference spells numbers out) affects only 10% of outputs; and
 orthographic variance — `हाँ` against `हां`, chandrabindu against anusvara, the same word
 scored as a total miss — was real. toWER now folds that class of difference away (see
-`normalize_orthography`), which moved the deltas from −21.65 and −16.53 to the figures above.
-
-So the numbers you see are *after* removing the obvious objection. **Roughly 4 points were
-measurement noise; the remaining ~18 are genuine.**
+`normalize_orthography`), which moved the first run's deltas from −21.65 to −17.91: **roughly
+4 points there were measurement noise.** The fold has applied to every run since, including
+the one above, so the numbers you see are already past that objection.
 
 ### The digit gap
 
@@ -65,10 +84,9 @@ normalizer cannot drift into inflating the score it is supposed to measure.
 
 **The direction matters.** This gap makes Tier 1 look *worse* than it is — the digit
 mismatches are counted against Chirp, so closing it would move both deltas toward zero, not
-further negative. The measured −17.91 and −14.75 are therefore a lower bound on Chirp's
-quality, not an upper one. How much of the ~18 points is digits has not been quantified, and
-the honest statement is that the finding "Tier 1 is worse here" survives the gap while its
-*magnitude* does not.
+further negative. The measured −22.72 is therefore a lower bound on Chirp's quality, not an
+upper one. How much of it is digits has not been quantified, and the honest statement is that
+the finding "Tier 1 is worse here" survives the gap while its *magnitude* does not.
 
 It is also the clearest hypothesis for what Tier 2 is for. The repair prompt already carries
 the instruction — *write numbers the way they were spoken, in words, not as digits* — so
@@ -77,11 +95,12 @@ more cheaply than a hand-built lexicon per language.
 
 ### Risk skewed low, as predicted
 
-Risk skewed hard low — 106 of 150 in the bottom bucket, median
-0.0667, nothing at all above 0.6 — because `ctc_rnnt_disagreement` carries weight 0.4667 and
-the two decoder heads agree on read speech. Only 2 of 10 buckets cleared the 20-sample floor,
+Risk skewed hard low — 123 of 150 in the bottom bucket, median
+0.0528, nothing at all above 0.6 — because `ctc_rnnt_disagreement` carries weight 0.4667 and
+the two decoder heads agree on read speech. Only 1 of 10 buckets cleared the 20-sample floor,
 and no larger sample would populate the top ones: this corpus contains no high-disagreement
-audio.
+audio. The skew held across both calibration runs, on entirely different speakers, which is
+some evidence it is a property of read speech rather than of who was recorded.
 
 ## How it works
 
@@ -288,13 +307,13 @@ as a noisy average.
 
 | | status |
 |---|---|
-| Chirp 2 vs IndicConformer delta | **measured** — 124 live calls, 2026-08-25 |
+| Chirp 2 vs IndicConformer delta | **measured** — 100 live calls across 150 distinct speakers, 2026-09-02, $0.052. Supersedes a 2026-08-25 run whose sample drew only 18 speakers |
 | Dynamic-batch rate, $0.004/min | **published pricing** — 75% below Standard's $0.016 |
 | Billing increment, 1 second | **published pricing** — the 15s increment is Speech-to-Text *On-Prem*, a different product |
 | Risk weights | **from the spec**, not refit — the spike confirmed the heads are exposed and the weights stand |
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
 | Digit/number mismatch | **measured, deliberately unfixed** — ~10% of the corpus; needs a per-language number lexicon, so it is counted against Tier 1 rather than folded away. Its direction inflates Tier 1's measured deficit |
-| Speaker-disjointness of the shipped table | **permanently unverifiable** — enforcement was wired in on 2026-09-02, after the run. The speaker metadata lived only in the calibration DB, which is gitignored and no longer exists; `results/scored.json` never carried the field and the committed fixtures cover only the demo audio. The guard protects future tables, not this one |
+| Speaker-disjointness of the shipped table | **enforced and verified** — 150 utterances from 150 speakers, one each; `stratify()` refuses to select a repeat, and `results/scored.json` now carries `speaker_id`. The previous table could not be checked this way, which is why it was withdrawn rather than kept |
 | Gemini repair path | **verified live** — 2026-09-02, free-tier key, `gemini-3.5-flash-lite`; digits expanded, clean text untouched, romanized code-mix restored. A recorded fixture replays it offline |
 | Gemini repair *delta* | **never measured** — no `tier2` entry exists. Needs a `dhvani-calibrate repair` phase (unbuilt) plus a `collect` re-run, since the references it would score against are gone |
 | Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |

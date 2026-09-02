@@ -1,8 +1,7 @@
 {
   "meta": {
     "bucket_n": {
-      "0.0-0.1": 100,
-      "0.1-0.2": 24
+      "0.0-0.1": 100
     },
     "dropped_buckets": [],
     "languages": [
@@ -10,7 +9,7 @@
       "kn-IN",
       "ml-IN"
     ],
-    "measured_at": "2026-08-25",
+    "measured_at": "2026-09-02",
     "min_bucket_samples": 20,
     "policy_id": "p1-2026-08-22",
     "risk_weights": {
@@ -20,12 +19,12 @@
       "script_mix_entropy": 0.26666666666666666,
       "short_segment": 0.06666666666666667
     },
-    "segments_escalated": 124,
-    "segments_selected": 124,
-    "spend_usd": 0.0
+    "segments_escalated": 100,
+    "segments_selected": 100,
+    "spend_usd": 0.052267,
+    "tier": "tier1"
   },
   "tier1": {
-    "0.0-0.1": -17.905996180378985,
-    "0.1-0.2": -14.745546950652347
+    "0.0-0.1": -22.71882343069545
   }
 }

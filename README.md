@@ -10,7 +10,7 @@ produces the evidence it consults.
 ```bash
 git clone <this repo> && cd Youtube
 uv sync --extra dev           # pytest only — no ML dependencies needed
-make test                     # 404 tests, offline (4 skip without the data extra)
+make test                     # 433 tests, offline (4 skip without the data extra)
 make track                    # captions a real Hindi clip, no model, no network
 ```
 
@@ -98,7 +98,7 @@ crash cannot under-count and let the $20 ceiling be breached on restart.
 ## Running it offline
 
 ```bash
-make test    # 404 tests: no torch, no cloud SDK, no credentials, no network
+make test    # 433 tests: no torch, no cloud SDK, no credentials, no network
 make track   # captions samples/fleurs-hi-*.wav from committed fixtures
 make bench   # cost/quality frontier from the measured delta table
 ```
@@ -121,6 +121,45 @@ dhvani samples/fleurs-hi-*.wav --delta-table samples/demo-delta-table.json \
 That uses a **deliberately fake** delta table, labelled as such in the file and asserted by a
 test. It exists because the real table's negative deltas mean nothing ever escalates, so the
 Phase 2 code would otherwise be undemonstrable. Never point a real run at it.
+
+## Repairing what shipped
+
+Tier 2 sends the best available hypothesis to Gemini for script, code-mix and digit repair on
+its free tier. It is **not** wired strictly downstream of Tier 1 as the original spec drew it:
+under the measured delta table nothing escalates to Tier 1, so a Tier 2 placed behind it would
+be permanently unreachable. It repairs Tier 1's text when Tier 1 ran and Tier 0's when it did
+not.
+
+```bash
+dhvani clip.wav --repair                      # repair what the delta table says is worth it
+dhvani clip.wav --repair --repair-quota 0     # watch it degrade
+```
+
+The free tier allows 1,000 requests/day, and the two limits that implies are handled
+differently on purpose. The **daily cap is a consumable** — over-running it is unrecoverable
+until midnight — so it fails closed through `Store.reserve_quota()`, one atomic statement
+taken before the call, the same discipline the USD ceiling uses. The **per-minute rate is
+pacing** — exceeding it returns a retryable 429 and consumes nothing — so it fails soft through
+an in-process token bucket. Reserving before pacing would burn a day's quota on calls never
+made.
+
+Exhaustion is a normal condition, not an error. The run completes, the caption ships with its
+unrepaired text marked `repair_unavailable`, and the next run picks it up — no job record
+needed, because "still wants repair" is already derivable from the content-addressed cache.
+
+That degradation path is demonstrable offline with **no credentials at all**, because
+degrading means not calling:
+
+```
+tier2: repaired 0, deferred 1 (quota_exhausted); deferred captions ship
+       unrepaired and retry on a later run
+```
+
+**Not yet verified against the vendor:** the Gemini model id, the free-tier RPM, and whether
+the quota resets at UTC midnight. `GEMINI_MODEL` is read from the environment rather than
+guessed, and no repair has yet been measured — there is no `tier2` entry in
+`delta_table.json`, so `--repair` currently changes nothing on real data. See
+[the design](docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md) §8.
 
 ## Calibrating it yourself
 
@@ -171,11 +210,12 @@ the dominant cost line inherits its error.
 ## Layout
 
 ```
-dhvani/            28 modules — segmenter, scorer, router, escalate, reconcile, store, CLIs
-tests/             31 files, 404 tests
+dhvani/            29 modules — segmenter, scorer, router, escalate, reconcile,
+                   repair, quota, store, CLIs
+tests/             35 files, 433 tests
 fixtures/          committed replay fixtures (Tier 0 and Tier 1)
 samples/           committed demo audio + attribution; the illustrative delta table
-docs/superpowers/  design spec, the three implementation plans, the scaling sketch
+docs/superpowers/  design specs, the three implementation plans, the scaling sketch
 delta_table.json   the measured routing table
 results/scored.json  phase 1 output, so buckets can be re-derived without paying again
 ```

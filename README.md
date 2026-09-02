@@ -105,7 +105,7 @@ reordering, duplication, transient errors):
 **Quota** is guarded the same way money is, because it is the same problem in another
 currency. `Store.reserve_quota()` claims a request against the daily free-tier cap in one
 atomic statement before the call. The per-minute rate is handled separately by an in-process
-token bucket: over-running the daily cap is unrecoverable until midnight, while going too fast
+token bucket: over-running the daily cap is unrecoverable until midnight Pacific, while going too fast
 merely returns a retryable 429 — different failure semantics, different mechanisms. Pacing is
 checked first, so being rate-limited never burns quota on a call that was not made.
 
@@ -149,17 +149,18 @@ be permanently unreachable. It repairs Tier 1's text when Tier 1 ran and Tier 0'
 not.
 
 ```bash
+export GEMINI_MODEL=gemini-2.5-flash-lite     # required; never defaulted, see below
 dhvani clip.wav --repair                      # repair what the delta table says is worth it
 dhvani clip.wav --repair --repair-quota 0     # watch it degrade
 ```
 
-The free tier allows 1,000 requests/day, and the two limits that implies are handled
-differently on purpose. The **daily cap is a consumable** — over-running it is unrecoverable
-until midnight — so it fails closed through `Store.reserve_quota()`, one atomic statement
-taken before the call, the same discipline the USD ceiling uses. The **per-minute rate is
-pacing** — exceeding it returns a retryable 429 and consumes nothing — so it fails soft through
-an in-process token bucket. Reserving before pacing would burn a day's quota on calls never
-made.
+The free tier imposes two limits, and they are handled differently on purpose. The **daily cap
+is a consumable** — over-running it is unrecoverable until the reset — so it fails closed
+through `Store.reserve_quota()`, one atomic statement taken before the call, the same
+discipline the USD ceiling uses. The **per-minute rate is pacing** — exceeding it returns a
+retryable 429 and consumes nothing — so it fails soft through an in-process token bucket.
+Pacing is checked first, because reserving before pacing would burn a day's quota on calls
+never made.
 
 Exhaustion is a normal condition, not an error. The run completes, the caption ships with its
 unrepaired text marked `repair_unavailable`, and the next run picks it up — no job record
@@ -173,14 +174,36 @@ tier2: repaired 0, deferred 1 (quota_exhausted); deferred captions ship
        unrepaired and retry on a later run
 ```
 
-**What the spike settled (2026-09-02):** the quota resets at midnight **Pacific**, not UTC, and
-applies per project rather than per key. The earlier UTC assumption was wrong in the dangerous
-direction — a UTC key rolls over eight hours early, so the gate would have reset a counter
-Google had not and allowed up to twice the cap in one Google day. What it could *not* settle is
-the daily limit itself: Google no longer publishes free-tier figures, so the configured cap is
-a local ceiling rather than the vendor's. Being wrong high is safe — a refusal from Google
-degrades the run instead of crashing it. And no repair has yet been measured — there is no `tier2` entry in
-`delta_table.json`, so `--repair` currently changes nothing on real data. See
+### What the spike found
+
+Run 2026-09-02 against published documentation. It settled two questions without a key, and
+one of the answers was a live bug.
+
+**The quota day rolled over eight hours early.** Google resets requests-per-day at midnight
+**Pacific**, per project rather than per key. The code keyed the day by UTC, on the recorded
+reasoning that a wrong boundary could only ever be *conservative*. That was backwards: UTC
+midnight is late afternoon Pacific the previous day, so the gate reset a counter Google had
+not, and would authorize up to **twice the cap** inside one Google day — the over-spending
+direction the whole reservation discipline exists to prevent. Now keyed with `ZoneInfo`, not a
+fixed offset, because Pacific moves an hour with daylight saving.
+
+**A guessed model id would have been retired.** `gemini-2.0-flash` is shut down; the current
+line is `gemini-3.7-flash`, `3.5-flash`, `2.5-flash-lite` and siblings. `GEMINI_MODEL` is read
+from the environment and has no default, which is why the guess was never made.
+
+**The daily limit is not knowable from documentation**, which inverts what the spec recorded.
+Google no longer publishes free-tier figures — they are per-project facts behind an AI Studio
+login — so the configured cap is a *local ceiling*, not the vendor's. Being wrong high is safe:
+a refusal from Google defers that segment and the run continues, rather than crashing at
+exactly the moment graceful degradation is supposed to happen.
+
+The pattern is worth noting twice over. This project already found that a question assumed to
+need account data — the billing increment — was published policy all along. This spike found
+the mirror image: a number recorded as published turned out to be an account fact. Neither
+direction was safe to assume, and both were cheap to check.
+
+**Still unmeasured:** there is no `tier2` entry in `delta_table.json`, so `--repair` currently
+changes nothing on real data. Measuring it costs nothing but needs a key. Full detail in
 [the design](docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md) §8.
 
 ## Calibrating it yourself
@@ -214,10 +237,15 @@ as a noisy average.
 | Gemini free-tier requests/day | **not knowable from docs** — Google no longer publishes it; it is a per-project fact behind an AI Studio login, so the configured cap is a local ceiling, not the vendor's |
 | Gemini model id | **namespace confirmed, choice open** — `gemini-2.0-flash` is retired; a Flash-class 2.5/3.x id is read from `GEMINI_MODEL` rather than guessed |
 
-The last three rows are the honest limits. The router has no evidence about high-risk
-segments because none occurred, and none about Tier 2 at all — the machinery is complete and
-the measurement is not, which is the same order this project ran for Tier 1. Measuring Tier 2
-is free, so what is missing is an API key rather than a budget.
+Two honest limits sit in that table. The router has **no evidence about high-risk segments**,
+because none occurred in the corpus — that is the ceiling on what the Tier 1 table can claim.
+And it has **no evidence about Tier 2 at all**: the machinery is complete and the measurement
+is not, which is the same order this project ran for Tier 1. Measuring Tier 2 is free, so what
+is missing there is an API key rather than a budget.
+
+The three Gemini rows below the delta also record which *kind* of fact each one is, because
+that turned out to matter: the reset boundary was published policy the code had wrongly
+assumed needed an account, and the requests-per-day figure was the reverse.
 
 ## At production scale
 

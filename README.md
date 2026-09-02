@@ -47,10 +47,37 @@ scored as a total miss — was real. toWER now folds that class of difference aw
 `normalize_orthography`), which moved the deltas from −21.65 and −16.53 to the figures above.
 
 So the numbers you see are *after* removing the obvious objection. **Roughly 4 points were
-measurement noise; the remaining ~18 are genuine.** Digits are the known remaining gap: they
-cost Tier 1 real WER and need a per-language number lexicon rather than a character fold.
+measurement noise; the remaining ~18 are genuine.**
 
-A second prediction held. Risk skewed hard low — 106 of 150 in the bottom bucket, median
+### The digit gap
+
+One measured defect is deliberately left in. Chirp writes `3456`; the IndicVoices references
+spell the number out. toWER scores that as a total miss on every token involved, and it affects
+about **10% of the calibration corpus**.
+
+`normalize_orthography()` does not fold it, and the restraint is the point. Every rule in that
+function changes how a word is *written* and never which word it is — NFC, candrabindu against
+anusvara, zero-width joiners, punctuation. Mapping `3456` to साढ़े तीन हज़ार is a different kind
+of operation: it needs a **per-language number lexicon**, including the grammar of how each
+language says compound numbers, and a rule loose enough to do it is loose enough to collapse
+नौ (nine) and नो, which are genuinely different words. A test pins that pair precisely so the
+normalizer cannot drift into inflating the score it is supposed to measure.
+
+**The direction matters.** This gap makes Tier 1 look *worse* than it is — the digit
+mismatches are counted against Chirp, so closing it would move both deltas toward zero, not
+further negative. The measured −17.91 and −14.75 are therefore a lower bound on Chirp's
+quality, not an upper one. How much of the ~18 points is digits has not been quantified, and
+the honest statement is that the finding "Tier 1 is worse here" survives the gap while its
+*magnitude* does not.
+
+It is also the clearest hypothesis for what Tier 2 is for. The repair prompt already carries
+the instruction — *write numbers the way they were spoken, in words, not as digits* — so
+measuring the `tier2` delta would partly be a test of whether a language model closes this gap
+more cheaply than a hand-built lexicon per language.
+
+### Risk skewed low, as predicted
+
+Risk skewed hard low — 106 of 150 in the bottom bucket, median
 0.0667, nothing at all above 0.6 — because `ctc_rnnt_disagreement` carries weight 0.4667 and
 the two decoder heads agree on read speech. Only 2 of 10 buckets cleared the 20-sample floor,
 and no larger sample would populate the top ones: this corpus contains no high-disagreement
@@ -232,6 +259,7 @@ as a noisy average.
 | Billing increment, 1 second | **published pricing** — the 15s increment is Speech-to-Text *On-Prem*, a different product |
 | Risk weights | **from the spec**, not refit — the spike confirmed the heads are exposed and the weights stand |
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
+| Digit/number mismatch | **measured, deliberately unfixed** — ~10% of the corpus; needs a per-language number lexicon, so it is counted against Tier 1 rather than folded away. Its direction inflates Tier 1's measured deficit |
 | Speaker-disjointness of the shipped table | **permanently unverifiable** — enforcement was wired in on 2026-09-02, after the run. The speaker metadata lived only in the calibration DB, which is gitignored and no longer exists; `results/scored.json` never carried the field and the committed fixtures cover only the demo audio. The guard protects future tables, not this one |
 | Gemini repair delta | **never measured** — the tier is built and gated, but no `tier2` entry exists, so `--repair` changes nothing on real data |
 | Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |

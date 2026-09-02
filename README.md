@@ -10,7 +10,7 @@ produces the evidence it consults.
 ```bash
 git clone <this repo> && cd Youtube
 uv sync --extra dev           # pytest only — no ML dependencies needed
-make test                     # 450 tests, offline (4 skip without the data extra)
+make test                     # 484 tests, offline (4 skip without the data extra)
 make track                    # captions a real Hindi clip, no model, no network
 ```
 
@@ -178,7 +178,7 @@ crash cannot under-count and let the $20 ceiling be breached on restart.
 ## Running it offline
 
 ```bash
-make test    # 450 tests: no torch, no cloud SDK, no credentials, no network
+make test    # 484 tests: no torch, no cloud SDK, no credentials, no network
 make track   # captions samples/fleurs-hi-*.wav from committed fixtures
 make bench   # cost/quality frontier from the measured delta table
 ```
@@ -384,7 +384,7 @@ the dominant cost line inherits its error.
 ```
 dhvani/            29 modules — segmenter, scorer, router, escalate, reconcile,
                    repair, quota, store, CLIs
-tests/             36 files, 450 tests
+tests/             37 files, 484 tests
 fixtures/          committed replay fixtures (Tier 0 and Tier 1)
 samples/           committed demo audio + attribution; the illustrative delta table
 docs/superpowers/  design specs, the three implementation plans, the scaling sketch
@@ -397,7 +397,7 @@ Three console scripts: `dhvani` (transcribe), `dhvani-bench` (frontier report),
 
 Optional extras, all genuinely optional: `models` (torch/transformers/onnxruntime), `cloud`
 (google-cloud-speech), `data` (datasets), `repair` (google-genai). The test suite passes with
-none of them installed — 4 of the 450 skip without `data`, and the skip is deliberate rather
+none of them installed — 4 of the 484 skip without `data`, and the skip is deliberate rather
 than incidental.
 
 ## Attribution

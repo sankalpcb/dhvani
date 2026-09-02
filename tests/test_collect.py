@@ -385,3 +385,43 @@ def test_identical_audio_in_two_languages_gets_distinct_cache_entries(store, pcm
             != store.get_hypothesis(sid, "tier0", kn[0]["tier0_variant"])["text"]), (
         "two languages must not share one cache entry for the same audio"
     )
+
+
+def test_scored_rows_carry_the_speaker_and_district(tmp_path):
+    """Spec §9.4 disjointness is enforced in stratify(), which sees only
+    the scored rows -- so the metadata has to travel with them.
+
+    collect() already persists both via put_reference(), but that store row
+    is not what selection reads. Recording them in the store and omitting
+    them here is exactly why disjoint_by() sat unused: the data existed and
+    never reached the point that needed it.
+    """
+    with Store(":memory:") as store:
+        scored = collect(_corpus(3), lambda lang: StubTier0(lang),
+                         store, ["hi-IN"], 3, str(tmp_path))
+
+    assert len(scored) == 3
+    assert {row["speaker_id"] for row in scored} == {"spk0", "spk1", "spk2"}
+    assert {row["district"] for row in scored} == {"d0", "d1", "d2"}
+
+
+def test_a_collected_corpus_stratifies_to_one_row_per_speaker(tmp_path):
+    """End to end: collect() -> stratify() must honour §9.4 without the
+    caller wiring anything up."""
+    from dhvani.calibrate import MIN_BUCKET_SAMPLES, stratify
+    from dhvani.corpus import disjoint_by
+
+    rng = np.random.default_rng(7)
+    # Same speaker on every utterance: a maximally concentrated corpus.
+    corpus = FakeCorpus([
+        (0.3 * rng.standard_normal(32000), 16000, f"ref-{i}", "hi-IN", "one-speaker", "D")
+        for i in range(MIN_BUCKET_SAMPLES + 5)
+    ])
+    with Store(":memory:") as store:
+        scored = collect(corpus, lambda lang: StubTier0(lang), store,
+                         ["hi-IN"], MIN_BUCKET_SAMPLES + 5, str(tmp_path))
+
+    selected = stratify(scored)
+
+    assert disjoint_by(selected, "speaker_id") is True
+    assert len(selected) == 1, f"one speaker yielded {len(selected)} samples"

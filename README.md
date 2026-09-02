@@ -232,6 +232,7 @@ as a noisy average.
 | Billing increment, 1 second | **published pricing** — the 15s increment is Speech-to-Text *On-Prem*, a different product |
 | Risk weights | **from the spec**, not refit — the spike confirmed the heads are exposed and the weights stand |
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
+| Speaker-disjointness of the shipped table | **unverifiable** — enforcement was wired in on 2026-09-02, after the 2026-08-25 run; `results/scored.json` predates the field, so whether those 124 segments repeated speakers cannot be checked from what is committed |
 | Gemini repair delta | **never measured** — the tier is built and gated, but no `tier2` entry exists, so `--repair` changes nothing on real data |
 | Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |
 | Gemini free-tier requests/day | **not knowable from docs** — Google no longer publishes it; it is a per-project fact behind an AI Studio login, so the configured cap is a local ceiling, not the vendor's |

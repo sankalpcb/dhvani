@@ -164,7 +164,11 @@ def disjoint_by(items, key: str) -> bool:
     """
     seen = set()
     for item in items:
-        value = getattr(item, key)
+        # Corpus items are objects; the scored rows stratify() selects from
+        # are dicts. Accepting both is what lets the spec §9.4 property be
+        # asserted at the point selection actually happens, rather than only
+        # on the stream feeding it.
+        value = item.get(key) if hasattr(item, "get") else getattr(item, key)
         if value is None:
             continue
         if value in seen:

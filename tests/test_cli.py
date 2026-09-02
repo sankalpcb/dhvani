@@ -492,3 +492,106 @@ def test_cli_replay_escalation_reserves_no_money(tmp_path, capsys):
 
     with Store(str(db)) as store:
         assert store.total_spend() == 0.0
+
+
+# --- Tier 2 repair wiring (design §5.2, M5) ---
+
+def _prepare_repair(tmp_path, wav_path, repaired_text="साढ़े तीन हज़ार"):
+    """tier0 fixtures plus tier2 fixtures and a positive tier2 delta table."""
+    from dhvani.backends.tier2_gemini import Tier2Gemini
+
+    _write_wav(wav_path)
+    samples, rate = sf.read(str(wav_path))
+    segments = split(normalize(samples, rate))
+
+    fixtures = tmp_path / "fixtures"
+    tier0_dir = fixtures / "tier0" / variant_slug(Tier0Conformer(lang="hi").variant_key)
+    tier0_dir.mkdir(parents=True, exist_ok=True)
+    for seg in segments:
+        (tier0_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": "3456", "signals": {"ctc_rnnt_disagreement": 0.1},
+        }))
+
+    backend = Tier2Gemini(hypothesis_source=lambda s: "", lang="hi-IN", model="")
+    tier2_dir = fixtures / "tier2" / variant_slug(backend.variant_key)
+    tier2_dir.mkdir(parents=True, exist_ok=True)
+    for seg in segments:
+        (tier2_dir / f"{seg.segment_id}.json").write_text(json.dumps({
+            "text": repaired_text, "signals": {},
+        }))
+
+    delta_path = tmp_path / "delta.json"
+    delta_path.write_text(json.dumps({"tier2": ALL_BUCKETS}))
+    return fixtures, delta_path, segments
+
+
+def test_cli_help_lists_the_repair_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "--repair" in capsys.readouterr().out
+
+
+def test_repair_replaces_the_text_with_the_repaired_version(tmp_path, capsys):
+    wav = tmp_path / "clip.wav"
+    fixtures, delta_path, segments = _prepare_repair(tmp_path, wav)
+
+    code = main([str(wav), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+                 "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+                 "--repair"])
+
+    assert code == 0
+    track = json.loads(capsys.readouterr().out)
+    assert all(e["text"] == "साढ़े तीन हज़ार" for e in track)
+    assert all(e["repair_unavailable"] is False for e in track)
+
+
+def test_without_the_flag_nothing_is_repaired(tmp_path, capsys):
+    wav = tmp_path / "clip.wav"
+    fixtures, delta_path, segments = _prepare_repair(tmp_path, wav)
+
+    code = main([str(wav), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+                 "--fixtures", str(fixtures), "--delta-table", str(delta_path)])
+
+    assert code == 0
+    track = json.loads(capsys.readouterr().out)
+    assert all(e["text"] == "3456" for e in track), "repaired without being asked"
+
+
+def test_exhausted_quota_still_exits_zero_and_marks_the_track(tmp_path, capsys):
+    """M5's demo, end to end through the CLI: the run completes and the
+    operator can see which captions did not get improved."""
+    wav = tmp_path / "clip.wav"
+    fixtures, delta_path, segments = _prepare_repair(tmp_path, wav)
+
+    code = main([str(wav), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+                 "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+                 "--repair", "--repair-quota", "0"])
+
+    assert code == 0, "quota exhaustion must not fail the run"
+    track = json.loads(capsys.readouterr().out)
+    assert all(e["repair_unavailable"] is True for e in track)
+    assert all(e["text"] == "3456" for e in track), "shipped without upstream text"
+
+
+def test_repair_in_replay_mode_never_builds_a_live_client(tmp_path, capsys,
+                                                          monkeypatch):
+    """Same tripwire discipline as Tier 1: Recorded is the only enforcer of
+    'replay never falls back to live', so assert the door is never opened."""
+    import dhvani.backends.tier2_gemini as tier2_mod
+    opened = []
+
+    def tripwire(*a, **k):
+        opened.append(a)
+        raise AssertionError("replay mode reached _default_client()")
+
+    monkeypatch.setattr(tier2_mod, "_default_client", tripwire)
+
+    wav = tmp_path / "clip.wav"
+    fixtures, delta_path, _ = _prepare_repair(tmp_path, wav)
+    code = main([str(wav), "--db", str(tmp_path / "t.db"), "--mode", "replay",
+                 "--fixtures", str(fixtures), "--delta-table", str(delta_path),
+                 "--repair"])
+
+    assert code == 0
+    assert opened == [], "replay mode built a live Gemini client"

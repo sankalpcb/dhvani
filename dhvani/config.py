@@ -42,3 +42,11 @@ RISK_WEIGHTS = {
 
 TAU_SHIP = 0.30
 TAU_FLAG = 0.65
+
+# Gemini free tier, per spec §11. UNVERIFIED against the vendor along with
+# the model id and the reset boundary -- see the day-one spike in
+# docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md §8.
+# Overridable per run with --repair-quota, which is also how the
+# exhaustion path is demonstrated (--repair-quota 0).
+GEMINI_DAILY_QUOTA = 1000
+GEMINI_RPM = 15

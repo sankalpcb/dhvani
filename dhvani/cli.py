@@ -30,7 +30,7 @@ import soundfile as sf
 from dhvani.audio import normalize
 from dhvani.backends.base import Recorded
 from dhvani.backends.tier0_conformer import Tier0Conformer
-from dhvani.config import POLICY_ID
+from dhvani.config import GEMINI_DAILY_QUOTA, GEMINI_RPM, POLICY_ID
 from dhvani.ids import source_id as make_source_id
 from dhvani.metrics import summarize
 from dhvani.pipeline import run
@@ -59,6 +59,14 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--reconcile", action="store_true",
         help="poll outstanding escalation jobs and merge any completed results",
+    )
+    ap.add_argument(
+        "--repair", action="store_true",
+        help="repair the best available hypothesis with Tier 2 (free tier)",
+    )
+    ap.add_argument(
+        "--repair-quota", type=int, default=GEMINI_DAILY_QUOTA,
+        help="daily Tier 2 request budget (0 demonstrates graceful degradation)",
     )
     args = ap.parse_args(argv)
 
@@ -152,6 +160,59 @@ def main(argv=None) -> int:
             if version:
                 final_entries = entries_from_json(
                     store.get_track(source, version)["content_json"])
+
+        if args.repair:
+            from dhvani.backends.tier2_gemini import Tier2Gemini
+            from dhvani.quota import QuotaGate, TokenBucket
+            from dhvani.repair import mark_unrepaired
+            from dhvani.repair import repair as do_repair
+            from dhvani.track import merge_entries
+
+            # The best available hypothesis is exactly what final_entries
+            # already holds: Tier 0's text, or the reconciled Tier 1 text
+            # when escalation ran. Reading it from here rather than from
+            # the store means this needs no per-tier variant_key lookup
+            # and cannot disagree with what the operator is about to see.
+            current = {e.segment_id: e.text for e in final_entries}
+            risks = {e.segment_id: e.risk for e in final_entries}
+
+            # Recorded wraps it for the same reason Tier 1 is wrapped: it
+            # is the only enforcer of "replay never falls back to live".
+            tier2 = Recorded(
+                Tier2Gemini(hypothesis_source=lambda s: current.get(s, ""),
+                            lang=f"{args.lang}-IN"),
+                args.mode, args.fixtures, store,
+            )
+            gate = QuotaGate(
+                store=store, tier=tier2.name, cap=args.repair_quota,
+                bucket=TokenBucket(capacity=max(1, GEMINI_RPM),
+                                   refill_per_sec=GEMINI_RPM / 60.0),
+            )
+            repair_segments = {s.segment_id: s for s in split(pcm)}
+            outcome = do_repair(source, final_entries, repair_segments,
+                                tier2, store, delta_table, gate)
+
+            updates = {
+                sid: {"text": store.get_hypothesis(
+                          sid, tier2.name, variant_key=tier2.variant_key)["text"],
+                      "risk": risks[sid]}
+                for sid in outcome.repaired
+            }
+            # Risk is carried through unchanged, so merge_entries recomputes
+            # the same band. Repair changes what a caption SAYS, never how
+            # much the system distrusts it -- the risk score was computed
+            # from Tier 0 decoder signals that no amount of downstream
+            # rewriting revisits.
+            final_entries = mark_unrepaired(
+                merge_entries(final_entries, updates), outcome.deferred)
+
+            if outcome.degraded:
+                print(
+                    f"tier2: repaired {len(outcome.repaired)}, "
+                    f"deferred {len(outcome.deferred)} ({outcome.reason}); "
+                    f"deferred captions ship unrepaired and retry on a later run",
+                    file=sys.stderr,
+                )
 
     payload = json.dumps([e.__dict__ for e in final_entries],
                          ensure_ascii=False, indent=2)

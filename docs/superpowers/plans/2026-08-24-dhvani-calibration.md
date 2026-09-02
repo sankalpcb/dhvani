@@ -406,7 +406,7 @@ class FakeCorpus:
         # items: list of (raw_audio, src_rate, reference, lang, speaker_id, district)
         self._items = list(items)
 
-    def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
+    def stream(self, lang: str, limit: int, max_per_speaker: int | None = None) -> Iterator[CorpusItem]:
         count = 0
         for raw, rate, reference, item_lang, speaker, district in self._items:
             if item_lang != lang:
@@ -427,7 +427,7 @@ class IndicVoicesCorpus:
     def __init__(self, dataset_id: str = "ai4bharat/IndicVoices"):
         self.dataset_id = dataset_id
 
-    def stream(self, lang: str, limit: int) -> Iterator[CorpusItem]:
+    def stream(self, lang: str, limit: int, max_per_speaker: int | None = None) -> Iterator[CorpusItem]:
         from datasets import load_dataset  # lazy: keeps the `data` extra optional
 
         config = lang.split("-")[0]  # "hi-IN" -> "hi"

@@ -16,3 +16,12 @@ __pycache__/
 # measured calibration data that cost real money and hours to produce.
 results/track.json
 results/report.md
+
+# Calibration run artifacts. Regenerable by `dhvani-calibrate collect`, and
+# large: 150 segments of raw PCM is ~31 MB of .npy that nothing in the repo
+# reads. results/scored.json is the CURATED, committed phase-1 output; a
+# root-level scored.json is just the last run's output file (the CLI's
+# default --scored-out) and is not the same thing.
+calibration_pcm/
+/scored.json
+delta_table_tier2.json

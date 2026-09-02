@@ -316,3 +316,48 @@ def test_stream_stops_at_the_limit_without_fetching_more_shards(tmp_path, monkey
 
     assert len(items) == 5
     assert fetched == ["a.parquet"], f"downloaded more than needed: {fetched}"
+
+
+# --- speaker-diverse sampling (2026-09-02) ---
+
+def test_stream_caps_utterances_per_speaker():
+    """IndicVoices shards are grouped by speaker, so reading sequentially
+    returns very few of them: a real 150-utterance collect drew from just
+    18 speakers, one contributing 45. stratify() then enforces
+    speaker-disjointness and selects 16 -- below the publication floor.
+
+    Capping per speaker at the SOURCE is what makes a diverse sample
+    reachable at all.
+    """
+    corpus = FakeCorpus([
+        (*_raw(i), f"ref-{i}", "hi-IN", "one-speaker" if i < 8 else f"spk{i}", "D")
+        for i in range(12)
+    ])
+    items = list(corpus.stream("hi-IN", limit=10, max_per_speaker=1))
+
+    speakers = [i.speaker_id for i in items]
+    assert len(speakers) == len(set(speakers)), f"repeated speaker: {speakers}"
+    assert speakers.count("one-speaker") == 1, "the dominant speaker was not capped"
+
+
+def test_max_per_speaker_defaults_to_unlimited():
+    """Backward compatible: existing callers see no behaviour change."""
+    corpus = FakeCorpus([
+        (*_raw(i), f"ref-{i}", "hi-IN", "same", "D") for i in range(5)
+    ])
+    assert len(list(corpus.stream("hi-IN", limit=5))) == 5
+
+
+def test_a_cap_above_one_allows_that_many():
+    corpus = FakeCorpus([
+        (*_raw(i), f"ref-{i}", "hi-IN", "same", "D") for i in range(6)
+    ])
+    assert len(list(corpus.stream("hi-IN", limit=6, max_per_speaker=2))) == 2
+
+
+def test_items_without_a_speaker_id_are_not_capped():
+    """Absent metadata is not a collision -- same rule disjoint_by uses."""
+    corpus = FakeCorpus([
+        (*_raw(i), f"ref-{i}", "hi-IN", None, "D") for i in range(4)
+    ])
+    assert len(list(corpus.stream("hi-IN", limit=4, max_per_speaker=1))) == 4

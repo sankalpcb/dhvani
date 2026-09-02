@@ -271,7 +271,7 @@ def calibration_source(dataset_id: str, lang: str) -> str:
 
 
 def collect(corpus, make_tier0, store, langs, per_lang: int,
-            pcm_cache_dir: str) -> list[dict]:
+            pcm_cache_dir: str, max_per_speaker: int | None = None) -> list[dict]:
     """Phase 1: transcribe and score a corpus locally. Slow, free, resumable.
 
     One utterance is one segment (spec §1.2), so the segmenter is bypassed
@@ -300,7 +300,8 @@ def collect(corpus, make_tier0, store, langs, per_lang: int,
 
     for lang in langs:
         tier0 = make_tier0(lang)
-        for item in corpus.stream(lang, limit=per_lang):
+        for item in corpus.stream(lang, limit=per_lang,
+                                  max_per_speaker=max_per_speaker):
             save_pcm(pcm_cache_dir, item.segment_id, item.pcm)
 
             store.put_segment(item.segment_id,

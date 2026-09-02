@@ -83,6 +83,13 @@ def main(argv=None) -> int:
     c.add_argument("--db", default="calibration.db")
     c.add_argument("--langs", nargs="+", default=DEFAULT_LANGS)
     c.add_argument("--per-lang", type=int, default=1000)
+    c.add_argument("--max-per-speaker", type=int, default=1,
+                   help="how many utterances ONE speaker may contribute. "
+                        "Defaults to 1 because stratify() selects at most one "
+                        "per speaker anyway (spec §9.4), so collecting more "
+                        "buys rows that can never be selected. 0 disables "
+                        "the cap and restores the pre-2026-09-02 behaviour, "
+                        "which drew 18 speakers out of 16,237.")
     c.add_argument("--scored-out", default="scored.json")
     c.add_argument("--pcm-cache", default=DEFAULT_PCM_CACHE,
                    help="directory phase 1 writes segment PCM to and phase 2 "
@@ -160,7 +167,8 @@ def main(argv=None) -> int:
             # corpus loader does to pick its config.
             scored = collect(corpus,
                              lambda lang: Tier0Conformer(lang=lang.split("-")[0]),
-                             store, args.langs, args.per_lang, args.pcm_cache)
+                             store, args.langs, args.per_lang, args.pcm_cache,
+                             max_per_speaker=args.max_per_speaker or None)
         _print_histogram(scored)
         with open(args.scored_out, "w", encoding="utf-8") as fh:
             json.dump(scored, fh, indent=2)

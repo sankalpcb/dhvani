@@ -152,6 +152,22 @@ as a noisy average.
 The last row is the honest limit of the current table: the router has no evidence about
 high-risk segments, because none occurred.
 
+## At production scale
+
+[The scaling sketch](docs/superpowers/specs/2026-09-02-dhvani-production-scaling.md) does the
+capacity and cost math at 720,000 audio-hours/day — written, not built, as spec §12 asks.
+
+At that rate the system sees **4,207 segments/second**. Tier 0 compute dominates at roughly
+**$27,100 per million audio-hours**, against **$256,800** for routing everything to Chirp, so
+the cascade is ~9.3x cheaper at the measured 0% escalation rate and stops paying for itself
+somewhere near 90%. `segment_id` being a SHA256 turns out to be a near-ideal Bigtable row key
+by accident — uniform by construction, immutable, so hot rows are cacheable with no
+invalidation — at the cost of scan locality, which is why `tracks` is keyed separately.
+
+Every figure is labelled measured, published or assumed. The single largest source of error is
+named up front: Tier 0's real-time factor came off one laptop with unpinned thread count, and
+the dominant cost line inherits its error.
+
 ## Layout
 
 ```
@@ -159,7 +175,7 @@ dhvani/            28 modules — segmenter, scorer, router, escalate, reconcile
 tests/             31 files, 404 tests
 fixtures/          committed replay fixtures (Tier 0 and Tier 1)
 samples/           committed demo audio + attribution; the illustrative delta table
-docs/superpowers/  design spec and the three implementation plans
+docs/superpowers/  design spec, the three implementation plans, the scaling sketch
 delta_table.json   the measured routing table
 results/scored.json  phase 1 output, so buckets can be re-derived without paying again
 ```

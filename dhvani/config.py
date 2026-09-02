@@ -43,10 +43,21 @@ RISK_WEIGHTS = {
 TAU_SHIP = 0.30
 TAU_FLAG = 0.65
 
-# Gemini free tier, per spec §11. UNVERIFIED against the vendor along with
-# the model id and the reset boundary -- see the day-one spike in
-# docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md §8.
-# Overridable per run with --repair-quota, which is also how the
-# exhaustion path is demonstrated (--repair-quota 0).
+# Spec §11 recorded a free tier of "1,000 requests/day". The spike of
+# 2026-09-02 could NOT confirm that, and the reason matters: Google no
+# longer publishes free-tier RPD/RPM figures at all. ai.google.dev/
+# gemini-api/docs/rate-limits now says limits "can be viewed in Google AI
+# Studio" -- they are per-PROJECT account facts behind a login, not
+# published policy. Reports also suggest free quotas were cut sharply in
+# December 2025, so 1,000 may be off by an order of magnitude.
+#
+# This is therefore a LOCAL CEILING, not the vendor's limit. It is safe to
+# be wrong high: repair() treats the vendor's own refusal as degradation
+# rather than a crash, so an over-generous value costs a wasted call, not a
+# failed run. Set --repair-quota to the real number from AI Studio when it
+# is known; --repair-quota 0 demonstrates the exhaustion path.
 GEMINI_DAILY_QUOTA = 1000
+
+# Likewise unpublished. 15 is a conservative pacing figure, not a measured
+# ceiling; the token bucket smooths bursts rather than enforcing a contract.
 GEMINI_RPM = 15

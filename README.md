@@ -173,9 +173,13 @@ tier2: repaired 0, deferred 1 (quota_exhausted); deferred captions ship
        unrepaired and retry on a later run
 ```
 
-**Not yet verified against the vendor:** the Gemini model id, the free-tier RPM, and whether
-the quota resets at UTC midnight. `GEMINI_MODEL` is read from the environment rather than
-guessed, and no repair has yet been measured — there is no `tier2` entry in
+**What the spike settled (2026-09-02):** the quota resets at midnight **Pacific**, not UTC, and
+applies per project rather than per key. The earlier UTC assumption was wrong in the dangerous
+direction — a UTC key rolls over eight hours early, so the gate would have reset a counter
+Google had not and allowed up to twice the cap in one Google day. What it could *not* settle is
+the daily limit itself: Google no longer publishes free-tier figures, so the configured cap is
+a local ceiling rather than the vendor's. Being wrong high is safe — a refusal from Google
+degrades the run instead of crashing it. And no repair has yet been measured — there is no `tier2` entry in
 `delta_table.json`, so `--repair` currently changes nothing on real data. See
 [the design](docs/superpowers/specs/2026-09-02-dhvani-tier2-repair-design.md) §8.
 
@@ -206,7 +210,9 @@ as a noisy average.
 | Risk weights | **from the spec**, not refit — the spike confirmed the heads are exposed and the weights stand |
 | Buckets above 0.2 | **never measured** — this corpus produces no high-disagreement audio |
 | Gemini repair delta | **never measured** — the tier is built and gated, but no `tier2` entry exists, so `--repair` changes nothing on real data |
-| Gemini model id, RPM, quota reset | **unverified** — read from the environment rather than guessed; awaiting a day-one spike |
+| Gemini quota reset boundary | **published policy** — midnight Pacific, per project, confirmed 2026-09-02 |
+| Gemini free-tier requests/day | **not knowable from docs** — Google no longer publishes it; it is a per-project fact behind an AI Studio login, so the configured cap is a local ceiling, not the vendor's |
+| Gemini model id | **namespace confirmed, choice open** — `gemini-2.0-flash` is retired; a Flash-class 2.5/3.x id is read from `GEMINI_MODEL` rather than guessed |
 
 The last three rows are the honest limits. The router has no evidence about high-risk
 segments because none occurred, and none about Tier 2 at all — the machinery is complete and

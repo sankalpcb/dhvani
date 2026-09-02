@@ -110,3 +110,38 @@ def test_pacing_recovers_but_the_daily_cap_does_not():
         clock.advance(10)  # tokens available again
         with pytest.raises(QuotaExhausted):
             gate.acquire()  # ...but the day's budget is gone
+
+
+# --- the quota day boundary (spike, 2026-09-02) ---
+
+from datetime import datetime, timezone  # noqa: E402
+
+from dhvani.quota import quota_day  # noqa: E402
+
+
+def _at(iso):
+    return lambda: datetime.fromisoformat(iso)
+
+
+def test_the_quota_day_follows_pacific_not_utc():
+    """Google resets RPD at midnight PACIFIC (ai.google.dev/gemini-api/docs/
+    rate-limits). Keying by UTC rolls our counter over ~8 hours early, so in
+    that window we reset a budget Google has not -- letting up to TWICE the
+    cap through in one Google day. The design's claim that a wrong boundary
+    could only ever be conservative was exactly backwards.
+    """
+    # 01:30 UTC on the 2nd is still 18:30 Pacific on the 1st.
+    assert quota_day(_at("2026-09-02T01:30:00+00:00")) == "2026-09-01"
+
+
+def test_the_day_rolls_over_at_pacific_midnight():
+    # 06:59 UTC = 23:59 PDT on the 1st; 07:00 UTC = 00:00 PDT on the 2nd.
+    assert quota_day(_at("2026-09-02T06:59:00+00:00")) == "2026-09-01"
+    assert quota_day(_at("2026-09-02T07:00:00+00:00")) == "2026-09-02"
+
+
+def test_the_boundary_tracks_daylight_saving():
+    """Pacific is UTC-7 in summer and UTC-8 in winter, so a fixed offset
+    would drift by an hour for half the year."""
+    assert quota_day(_at("2026-01-15T07:30:00+00:00")) == "2026-01-14"  # PST
+    assert quota_day(_at("2026-07-15T07:30:00+00:00")) == "2026-07-15"  # PDT

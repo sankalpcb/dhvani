@@ -18,6 +18,7 @@ is why it lives in the store instead.
 
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 class QuotaExhausted(RuntimeError):
@@ -68,16 +69,37 @@ class RateLimited(RuntimeError):
     """Too many requests too fast. Soft: nothing was consumed, retry later."""
 
 
-def utc_today() -> str:
-    """The quota day key, as a UTC date string.
+# Google resets requests-per-day quotas at midnight PACIFIC, and applies
+# limits per project rather than per API key.
+# https://ai.google.dev/gemini-api/docs/rate-limits  (checked 2026-09-02)
+QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 
-    UNVERIFIED (design §8): Google's reset boundary is assumed to be UTC
-    midnight and has not been confirmed against the vendor. Getting this
-    wrong shifts the reset by hours and can never over-spend -- a stale
-    day key only makes the gate more conservative -- so it is a safe
-    assumption to ship while the spike is outstanding.
+
+def quota_day(now=None) -> str:
+    """The quota day key, on Google's reset boundary.
+
+    SETTLED by the spike of 2026-09-02, which overturned this function.
+    It keyed by UTC, on the documented reasoning that a wrong boundary
+    "can never over-spend -- a stale day key only makes the gate more
+    conservative". That was exactly backwards, and worth spelling out
+    because the same mistake is easy to repeat:
+
+    UTC midnight is 16:00-17:00 Pacific the PREVIOUS day, so a UTC key
+    rolls over roughly eight hours EARLY. In that window the gate resets a
+    counter Google has not, and happily authorizes a second full day's
+    worth of requests inside one Google day -- up to 2x the cap. The error
+    was in the over-spending direction, which is the direction this
+    project's whole reservation discipline exists to prevent.
+
+    ZoneInfo rather than a fixed offset: Pacific is UTC-7 in summer and
+    UTC-8 in winter, so a hardcoded offset would be wrong for half the
+    year and would drift the boundary by an hour rather than fixing it.
+
+    `now` is a zero-argument callable returning an aware datetime, so the
+    boundary is testable without waiting for midnight.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    at = now() if now is not None else datetime.now(timezone.utc)
+    return at.astimezone(QUOTA_TZ).strftime("%Y-%m-%d")
 
 
 class QuotaGate:
@@ -90,7 +112,7 @@ class QuotaGate:
     fast would burn a day's quota on a call that was never made.
     """
 
-    def __init__(self, store, tier: str, cap: int, bucket: TokenBucket, today=utc_today):
+    def __init__(self, store, tier: str, cap: int, bucket: TokenBucket, today=quota_day):
         self.store = store
         self.tier = tier
         self.cap = cap

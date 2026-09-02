@@ -23,6 +23,7 @@ itself, exactly as the negative Tier 1 deltas already do.
 
 from dataclasses import dataclass, field, replace
 
+from dhvani.backends.base import FixtureMissing
 from dhvani.quota import QuotaExhausted, RateLimited
 from dhvani.router import Candidate, delta_for, plan
 
@@ -99,7 +100,26 @@ def repair(source_id, entries, segments, backend, store, delta_table, gate,
             outcome.reason = outcome.reason or "rate_limited"
             continue
 
-        result = backend.transcribe(segments[cand.segment_id])
+        try:
+            result = backend.transcribe(segments[cand.segment_id])
+        except FixtureMissing:
+            # Deliberately NOT degraded. Replay never falls back to live,
+            # and a missing fixture is a hard error by design -- swallowing
+            # it here would turn an offline mistake into a silent no-op and
+            # let a run claim it repaired nothing when it was never able to
+            # try. This is the one failure that must still abort.
+            raise
+        except Exception:
+            # Everything else degrades. The local cap is a GUESS -- the
+            # account's real requests-per-day is not published anywhere
+            # readable (see quota.quota_day and the 2026-09-02 spike), so
+            # authorizing a call Google then refuses is an expected
+            # condition, not a bug. Same reasoning reconcile() uses to wrap
+            # each poll(): one failing unit must not abandon the pass.
+            outcome.deferred.append(cand.segment_id)
+            outcome.reason = outcome.reason or "backend_error"
+            continue
+
         store.put_hypothesis(
             cand.segment_id, backend.name, result["text"],
             result.get("signals", {}), 0.0, variant_key=backend.variant_key,
